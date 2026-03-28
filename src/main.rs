@@ -24,6 +24,8 @@ fn main() {
         // 1. attach_colliders finds glTF entities by name and adds colliders
         // 2. attach_joints runs after, connecting wheels to chassis with hinges
         .add_systems(Update, (attach_colliders, attach_joints).chain())
+        .add_systems(Update, drive)
+        .add_systems(Update, respawn_rover)
         .run();
 }
 
@@ -83,10 +85,15 @@ fn setup(
     // SceneRoot spawns all those nodes as children of this entity.
     // Lift the rover up so it spawns above the ground and falls onto it
     commands.spawn((
+        RoverRoot,
         SceneRoot(asset_server.load("rover_1.glb#Scene0")),
         Transform::from_xyz(0.0, 5.0, 0.0),
     ));
 }
+
+/// Marker component on the rover root entity so we can find it to despawn
+#[derive(Component)]
+struct RoverRoot;
 
 /// Stores the chassis Entity so wheels can create joints back to it.
 /// Option<Entity> because it starts as None until the chassis is found.
@@ -124,6 +131,8 @@ fn attach_colliders(
                         Quat::IDENTITY,
                         Collider::cuboid(2.775, 1.5, 1.0),
                     )]),
+                    // ExternalImpulse lets us apply steering kicks from the drive system
+                    ExternalImpulse::default(),
                 ));
                 chassis_res.0 = Some(entity);
             }
@@ -136,9 +145,57 @@ fn attach_colliders(
                         wheel_rotation,
                         Collider::cylinder(0.68, 1.12),
                     )]),
+                    // High friction for knobby off-road tires — more grip, less sliding
+                    Friction::coefficient(1.0),
                 ));
             }
             _ => {}
+        }
+    }
+}
+
+/// Reads keyboard input and drives the rover.
+/// W/S = throttle (forward/reverse), A/D = steering (torque on chassis)
+fn drive(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    // Query all wheel joints — we'll update their motor velocity
+    mut wheels: Query<&mut ImpulseJoint>,
+    // Query the chassis for applying steering torque
+    chassis_res: Res<ChassisEntity>,
+    mut ext_impulses: Query<&mut ExternalImpulse>,
+) {
+    // --- Throttle ---
+    // W = forward (negative velocity because of wheel spin direction),
+    // S = reverse. 0 if neither pressed — wheels coast to a stop via motor damping.
+    let throttle = if keyboard.pressed(KeyCode::KeyW) { 10.0 }
+        else if keyboard.pressed(KeyCode::KeyS) { -10.0 }
+        else { 0.0 };
+
+    // Update every wheel joint's motor target velocity
+    for mut joint in wheels.iter_mut() {
+        // Pattern match to get the inner RevoluteJoint from the TypedJoint enum,
+        // then set the motor velocity. This tells Rapier "spin this joint toward
+        // this velocity, applying up to 50 units of torque to get there"
+        if let TypedJoint::RevoluteJoint(ref mut revolute) = joint.data {
+            revolute.set_motor_velocity(throttle, 50.0);
+        }
+    }
+
+    // --- Steering ---
+    // A/D applies a torque around Y (up axis) to the chassis body.
+    // This rotates the whole rover left/right. Hacky but effective for V1.
+    // ExternalImpulse is an instant angular kick, applied once per frame.
+    // Much more responsive than ExternalForce for steering.
+    // Flip steering when reversing — A should always turn the rover "left"
+    // relative to its direction of travel
+    let direction = if throttle >= 0.0 { 1.0 } else { -1.0 };
+    let steer_impulse = if keyboard.pressed(KeyCode::KeyA) { 5.0 * direction }
+        else if keyboard.pressed(KeyCode::KeyD) { -5.0 * direction }
+        else { 0.0 };
+
+    if let Some(chassis_id) = chassis_res.0 {
+        if let Ok(mut impulse) = ext_impulses.get_mut(chassis_id) {
+            impulse.torque_impulse = Vec3::new(0.0, steer_impulse, 0.0);
         }
     }
 }
@@ -166,11 +223,41 @@ fn attach_joints(
             // local_anchor2 = where on the wheel (its center)
             let joint = RevoluteJointBuilder::new(Vec3::Z)
                 .local_anchor1(offset)
-                .local_anchor2(Vec3::ZERO);
+                .local_anchor2(Vec3::ZERO)
+                // Motor: target velocity 0 (updated by drive system), max force 50
+                // The factor controls how hard the motor pushes to reach target speed
+                .motor_velocity(0.0, 50.0);
 
             commands.entity(entity).insert(
                 ImpulseJoint::new(chassis_id, joint),
             );
         }
     }
+}
+
+/// Press R to despawn the rover and spawn a fresh one at the starting position.
+/// DespawnRecursive removes the entity and all its children (wheels, meshes, etc.)
+fn respawn_rover(
+    mut commands: Commands,
+    keyboard: Res<ButtonInput<KeyCode>>,
+    rover_query: Query<Entity, With<RoverRoot>>,
+    asset_server: Res<AssetServer>,
+    mut chassis_res: ResMut<ChassisEntity>,
+) {
+    if !keyboard.just_pressed(KeyCode::KeyR) { return; }
+
+    // Despawn the old rover and all its children
+    for entity in rover_query.iter() {
+        commands.entity(entity).despawn();
+    }
+
+    // Clear the chassis reference so attach_colliders/attach_joints re-run
+    chassis_res.0 = None;
+
+    // Spawn a fresh rover
+    commands.spawn((
+        RoverRoot,
+        SceneRoot(asset_server.load("rover_1.glb#Scene0")),
+        Transform::from_xyz(0.0, 5.0, 0.0),
+    ));
 }
