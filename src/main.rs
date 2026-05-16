@@ -172,8 +172,6 @@ fn attach_colliders(
                         Quat::IDENTITY,
                         Collider::cuboid(2.775, 1.5, 1.0),
                     )]),
-                    // ExternalImpulse lets us apply steering kicks from the drive system
-                    ExternalImpulse::default(),
                 ));
                 chassis_res.0 = Some(entity);
             }
@@ -188,6 +186,7 @@ fn attach_colliders(
                     )]),
                     // High friction for knobby off-road tires — more grip, less sliding
                     Friction::coefficient(1.0),
+                    Wheel,
                 ));
             }
             _ => {}
@@ -196,85 +195,133 @@ fn attach_colliders(
 }
 
 /// Reads keyboard input and drives the rover.
-/// W/S = throttle (forward/reverse), A/D = steering (torque on chassis)
+/// W/S = throttle (spin all wheels forward/reverse).
+/// A/D = steering: front wheels swing one way, rear wheels swing the opposite
+/// way (4WS opposite-phase). Releasing the key lets the motor spring back to 0.
 fn drive(
     keyboard: Res<ButtonInput<KeyCode>>,
-    // Query all wheel joints — we'll update their motor velocity
-    mut wheels: Query<&mut ImpulseJoint>,
-    // Query the chassis for applying steering torque
-    chassis_res: Res<ChassisEntity>,
-    mut ext_impulses: Query<&mut ExternalImpulse>,
+    mut wheel_joints: Query<&mut ImpulseJoint, (With<Wheel>, Without<SteeringKnuckle>)>,
+    mut knuckle_joints: Query<(&SteeringKnuckle, &mut ImpulseJoint), Without<Wheel>>,
 ) {
     // --- Throttle ---
-    // W = forward (negative velocity because of wheel spin direction),
-    // S = reverse. 0 if neither pressed — wheels coast to a stop via motor damping.
     let throttle = if keyboard.pressed(KeyCode::KeyW) { 10.0 }
         else if keyboard.pressed(KeyCode::KeyS) { -10.0 }
         else { 0.0 };
 
-    // Update every wheel joint's motor target velocity
-    for mut joint in wheels.iter_mut() {
-        // Pattern match to get the inner RevoluteJoint from the TypedJoint enum,
-        // then set the motor velocity. This tells Rapier "spin this joint toward
-        // this velocity, applying up to 50 units of torque to get there"
+    for mut joint in wheel_joints.iter_mut() {
         if let TypedJoint::RevoluteJoint(ref mut revolute) = joint.data {
             revolute.set_motor_velocity(throttle, 50.0);
         }
     }
 
     // --- Steering ---
-    // A/D applies a torque around Y (up axis) to the chassis body.
-    // This rotates the whole rover left/right. Hacky but effective for V1.
-    // ExternalImpulse is an instant angular kick, applied once per frame.
-    // Much more responsive than ExternalForce for steering.
-    // Flip steering when reversing — A should always turn the rover "left"
-    // relative to its direction of travel
-    let direction = if throttle >= 0.0 { 1.0 } else { -1.0 };
-    let steer_impulse = if keyboard.pressed(KeyCode::KeyA) { 5.0 * direction }
-        else if keyboard.pressed(KeyCode::KeyD) { -5.0 * direction }
+    // A = +angle on the front knuckles, -angle on the rear (opposite phase).
+    // D mirrors that. No input → target 0 and the motor springs back to center.
+    let steer = if keyboard.pressed(KeyCode::KeyA) { MAX_STEER }
+        else if keyboard.pressed(KeyCode::KeyD) { -MAX_STEER }
         else { 0.0 };
 
-    if let Some(chassis_id) = chassis_res.0 {
-        if let Ok(mut impulse) = ext_impulses.get_mut(chassis_id) {
-            impulse.torque_impulse = Vec3::new(0.0, steer_impulse, 0.0);
+    for (knuckle, mut joint) in knuckle_joints.iter_mut() {
+        let target = if knuckle.is_front { steer } else { -steer };
+        if let TypedJoint::RevoluteJoint(ref mut revolute) = joint.data {
+            revolute.set_motor_position(target, STEERING_STIFFNESS, STEERING_DAMPING);
         }
     }
 }
 
 /// Separate system that attaches joints. Runs after attach_colliders.
 /// Looks for wheel entities that have a Collider but no ImpulseJoint yet.
-/// This handles the race condition where wheels might get colliders before
-/// the chassis is found — joints are added on the next frame once both exist.
+/// Builds the steering linkage for each wheel:
+///   chassis  --(revolute around Y, steering motor)-->  knuckle
+///   knuckle  --(revolute around Z, throttle motor)-->  wheel
+/// The knuckle is a small dummy body whose orientation about chassis-Y is
+/// the steering angle. The wheel then spins about the knuckle's Z, which
+/// is the chassis Z rotated by that steering angle — so the wheel rolls
+/// in whichever direction the knuckle is currently pointing.
 fn attach_joints(
     mut commands: Commands,
-    wheels: Query<(Entity, &Name), (With<Collider>, Without<ImpulseJoint>)>,
+    wheels: Query<(Entity, &Name), (With<Collider>, Without<ImpulseJoint>, With<Wheel>)>,
     chassis_res: Res<ChassisEntity>,
+    xforms: Query<&GlobalTransform>,
 ) {
-    // Can't create joints until we know the chassis entity
     let Some(chassis_id) = chassis_res.0 else { return };
+    let Ok(chassis_xform) = xforms.get(chassis_id) else { return };
+    let chassis_pos = chassis_xform.translation();
+    let chassis_rot = chassis_xform.rotation();
 
-    for (entity, name) in wheels.iter() {
+    for (wheel_entity, name) in wheels.iter() {
         let name_str = name.as_str();
+        let Some(&(_, offset)) = WHEEL_OFFSETS.iter().find(|(n, _)| *n == name_str) else {
+            continue;
+        };
+        let is_front = offset.x < 0.0;
 
-        if let Some(&(_, offset)) = WHEEL_OFFSETS.iter().find(|(n, _)| *n == name_str) {
-            // RevoluteJoint = a hinge. The wheel can spin around one axis
-            // but is otherwise locked to the chassis.
-            // Vec3::Z = the spin axis (axle direction, side-to-side)
-            // local_anchor1 = where on the chassis the joint connects
-            // local_anchor2 = where on the wheel (its center)
-            let joint = RevoluteJointBuilder::new(Vec3::Z)
-                .local_anchor1(offset)
-                .local_anchor2(Vec3::ZERO)
-                // Motor: target velocity 0 (updated by drive system), max force 50
-                // The factor controls how hard the motor pushes to reach target speed
-                .motor_velocity(0.0, 50.0);
+        // Place the knuckle at the wheel's current world position so Rapier
+        // doesn't have to yank the joint constraint into shape on frame 1.
+        let knuckle_world_pos = chassis_pos + chassis_rot * offset;
 
-            commands.entity(entity).insert(
-                ImpulseJoint::new(chassis_id, joint),
-            );
-        }
+        // Chassis ↔ knuckle: revolute around chassis-local Y (the steering axis).
+        // Spring-loaded motor pulls the knuckle to whatever target angle the
+        // drive system commands, with critical-ish damping so it doesn't
+        // oscillate when the rover hits a bump.
+        let steering_joint = RevoluteJointBuilder::new(Vec3::Y)
+            .local_anchor1(offset)
+            .local_anchor2(Vec3::ZERO)
+            .motor_position(0.0, STEERING_STIFFNESS, STEERING_DAMPING)
+            .limits([-MAX_STEER, MAX_STEER]);
+
+        let knuckle = commands
+            .spawn((
+                Transform::from_translation(knuckle_world_pos),
+                RigidBody::Dynamic,
+                // The knuckle has no collider, so its rotational inertia
+                // would default to zero — which makes the steering motor's
+                // torque produce undefined angular acceleration and locks
+                // the constraint solver. Give it explicit mass + inertia.
+                AdditionalMassProperties::MassProperties(MassProperties {
+                    local_center_of_mass: Vec3::ZERO,
+                    mass: 5.0,
+                    principal_inertia: Vec3::splat(1.0),
+                    principal_inertia_local_frame: Quat::IDENTITY,
+                }),
+                ImpulseJoint::new(chassis_id, steering_joint),
+                SteeringKnuckle { is_front },
+            ))
+            .id();
+
+        // Knuckle ↔ wheel: revolute around knuckle-local Z (the spin axis).
+        // When the knuckle is at steering angle 0, its Z is aligned with the
+        // chassis Z (sideways); when steered, the Z axis rotates with it.
+        let spin_joint = RevoluteJointBuilder::new(Vec3::Z)
+            .local_anchor1(Vec3::ZERO)
+            .local_anchor2(Vec3::ZERO)
+            .motor_velocity(0.0, 50.0);
+
+        commands.entity(wheel_entity).insert(
+            ImpulseJoint::new(knuckle, spin_joint),
+        );
     }
 }
+
+/// Marker on the wheel entities so the drive system can target the spin motor.
+#[derive(Component)]
+struct Wheel;
+
+/// Marker + per-wheel orientation flag on the knuckle entities. `is_front`
+/// determines the sign of the steering target (front and rear are
+/// opposite-phase for tighter turns).
+#[derive(Component)]
+struct SteeringKnuckle {
+    is_front: bool,
+}
+
+/// Steering geometry constants.
+const MAX_STEER: f32 = 0.5;            // ~28.6° wheel travel each side
+// PD-controller gains for the steering motor. With knuckle inertia ≈ 1
+// kg·m², critical damping is 2·√(K·I) ≈ 2·√300 ≈ 35; we sit slightly
+// over-damped so the wheels settle without overshoot when you let go.
+const STEERING_STIFFNESS: f32 = 300.0;
+const STEERING_DAMPING: f32 = 50.0;
 
 /// Press R to despawn the rover and spawn a fresh one at the starting position.
 /// DespawnRecursive removes the entity and all its children (wheels, meshes, etc.)
