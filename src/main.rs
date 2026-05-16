@@ -1,6 +1,10 @@
+use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::prelude::*;
 use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin};
 use bevy_rapier3d::prelude::*;
+
+mod terrain;
+use terrain::{LunarTerrain, LunarTerrainConfig};
 
 fn main() {
     App::new()
@@ -13,19 +17,23 @@ fn main() {
         // Rapier physics engine — simulates gravity, collisions, joints
         // NoUserData means we don't attach custom data to colliders
         .add_plugins(RapierPhysicsPlugin::<NoUserData>::default())
-        // Draws wireframes around colliders so we can see if they match our meshes
-        // Remove this once we're happy with the collider shapes
-        .add_plugins(RapierDebugRenderPlugin::default())
+        // Wireframes around colliders. Disabled by default because rendering
+        // every heightfield triangle edge as a gizmo line is very slow on a
+        // 161×161 terrain. Toggle with F1.
+        .add_plugins(RapierDebugRenderPlugin::default().disabled())
+        // FPS / frame-time diagnostics so the on-screen counter has data
+        .add_plugins(FrameTimeDiagnosticsPlugin::default())
         // Initialize the chassis resource as empty — attach_physics will fill it
         .init_resource::<ChassisEntity>()
         // Run `setup` once at startup, before the first frame
-        .add_systems(Startup, setup)
+        .add_systems(Startup, (setup, setup_fps_text))
         // Two-phase physics setup:
         // 1. attach_colliders finds glTF entities by name and adds colliders
         // 2. attach_joints runs after, connecting wheels to chassis with hinges
         .add_systems(Update, (attach_colliders, attach_joints).chain())
         .add_systems(Update, drive)
         .add_systems(Update, respawn_rover)
+        .add_systems(Update, (update_fps_text, toggle_debug_render))
         .run();
 }
 
@@ -68,14 +76,39 @@ fn setup(
         Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -1.0, 0.5, 0.0)),
     ));
 
-    // --- Ground Plane ---
-    // A 50x50 flat surface at the origin. We add RigidBody::Fixed so Rapier knows
-    // this doesn't move, and a halfspace collider (infinite plane pointing up).
+    // --- Lunar Terrain ---
+    // Procedurally generated heightmap: rolling regolith with impact craters.
+    // The visual mesh and the Rapier heightfield collider share the same height
+    // grid, so what you drive on is exactly what you see.
+    let terrain = LunarTerrain::generate(LunarTerrainConfig::default());
+    let n = terrain.resolution;
+    let span = 2.0 * terrain.size;
+    // Rapier's heightfield convention: rows are the Z axis, columns are the X
+    // axis, and the Vec is read in column-major order. Our heights are stored
+    // row-major as `heights[z * n + x]`, so we reorder into [x_outer, z_inner].
+    let mut hf_heights = Vec::with_capacity(n * n);
+    for x in 0..n {
+        for z in 0..n {
+            hf_heights.push(terrain.heights[z * n + x]);
+        }
+    }
+    let heightfield = Collider::heightfield(
+        hf_heights,
+        n, // num_rows -> Z
+        n, // num_cols -> X
+        Vect::new(span, 1.0, span),
+    );
     commands.spawn((
-        Mesh3d(meshes.add(Plane3d::default().mesh().size(50.0, 50.0))),
-        MeshMaterial3d(materials.add(Color::srgb(0.3, 0.3, 0.3))),
+        Mesh3d(meshes.add(terrain.build_mesh())),
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color: Color::srgb(0.3, 0.3, 0.3),
+            perceptual_roughness: 0.95,
+            metallic: 0.0,
+            reflectance: 0.2,
+            ..default()
+        })),
         RigidBody::Fixed,
-        Collider::halfspace(Vect::Y).unwrap(),
+        heightfield,
     ));
 
     // --- Rover ---
@@ -87,7 +120,7 @@ fn setup(
     commands.spawn((
         RoverRoot,
         SceneRoot(asset_server.load("rover_1.glb#Scene0")),
-        Transform::from_xyz(0.0, 5.0, 0.0),
+        Transform::from_xyz(0.0, 1.5, 0.0),
     ));
 }
 
@@ -258,6 +291,46 @@ fn respawn_rover(
     commands.spawn((
         RoverRoot,
         SceneRoot(asset_server.load("rover_1.glb#Scene0")),
-        Transform::from_xyz(0.0, 5.0, 0.0),
+        Transform::from_xyz(0.0, 1.5, 0.0),
     ));
+}
+
+/// Marker for the FPS counter text node so the update system can find it.
+#[derive(Component)]
+struct FpsText;
+
+fn setup_fps_text(mut commands: Commands) {
+    commands.spawn((
+        Text::new("FPS: --"),
+        TextFont { font_size: 18.0, ..default() },
+        TextColor(Color::srgb(1.0, 1.0, 0.4)),
+        Node {
+            position_type: PositionType::Absolute,
+            top: Val::Px(8.0),
+            right: Val::Px(12.0),
+            ..default()
+        },
+        FpsText,
+    ));
+}
+
+fn update_fps_text(
+    diagnostics: Res<DiagnosticsStore>,
+    mut query: Query<&mut Text, With<FpsText>>,
+) {
+    let Ok(mut text) = query.single_mut() else { return };
+    let Some(fps_diag) = diagnostics.get(&FrameTimeDiagnosticsPlugin::FPS) else { return };
+    let Some(fps) = fps_diag.smoothed() else { return };
+    **text = format!("FPS: {:>5.1}", fps);
+}
+
+/// F1 toggles Rapier's wireframe debug renderer. Off by default because
+/// drawing every heightfield triangle edge as a gizmo line tanks the framerate.
+fn toggle_debug_render(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mut ctx: ResMut<DebugRenderContext>,
+) {
+    if keyboard.just_pressed(KeyCode::F1) {
+        ctx.enabled = !ctx.enabled;
+    }
 }
