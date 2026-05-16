@@ -370,16 +370,16 @@ const STEERING_DAMPING: f32 = 150.0;
 /// Suspension geometry + PD gains.
 ///   - SUSPENSION_TRAVEL: how far the hub can slide each way (m).
 ///   - SUSPENSION_STIFFNESS: spring rate per wheel (N/m). Sized so the
-///     rover sags ≈ 6 cm under its own weight at rest.
-///     compression ≈ chassis_weight / (4 · K)
-///                  ≈ (50 · 9.81) / (4 · 2000) ≈ 6.1 cm.
+///     rover sags ≈ 20 cm under its own weight at rest:
+///     compression ≈ chassis_weight / (4 · K) ≈ (50 · 9.81)/(4·600) ≈ 0.20 m.
 ///   - SUSPENSION_DAMPING: shock-absorber rate (N·s/m). Critical damping
-///     for the per-wheel sprung mass m ≈ 12.5 kg is 2·√(K·m) ≈ 316,
-///     so 400 gives a slightly over-damped ride that absorbs without
-///     bouncing back through the rover frame.
+///     for the per-wheel sprung mass m ≈ 12.5 kg is 2·√(K·m) ≈ 173.
+///     We sit at ratio ≈ 0.46 (well under-critical) so bumps bounce a
+///     couple of cycles before settling — visibly springy. Natural
+///     period ≈ 2π/√(K/m·(1-ζ²)) ≈ 1.0 s.
 const SUSPENSION_TRAVEL: f32 = 0.35;
-const SUSPENSION_STIFFNESS: f32 = 2000.0;
-const SUSPENSION_DAMPING: f32 = 400.0;
+const SUSPENSION_STIFFNESS: f32 = 600.0;
+const SUSPENSION_DAMPING: f32 = 80.0;
 
 /// R = respawn upright at the rover's current XZ position (useful for
 /// flipping back over without losing progress across the terrain).
