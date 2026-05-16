@@ -273,43 +273,66 @@ fn attach_joints(
         };
         let is_front = offset.x < 0.0;
 
-        // Place the knuckle at the wheel's current world position so Rapier
-        // doesn't have to yank the joint constraint into shape on frame 1.
-        let knuckle_world_pos = chassis_pos + chassis_rot * offset;
+        // Place the hub/knuckle at the wheel's current world position so
+        // Rapier doesn't have to yank constraints into shape on frame 1.
+        let hub_world_pos = chassis_pos + chassis_rot * offset;
 
-        // Chassis ↔ knuckle: revolute around chassis-local Y (the steering axis).
-        // Spring-loaded motor pulls the knuckle to whatever target angle the
-        // drive system commands, with critical-ish damping so it doesn't
-        // oscillate when the rover hits a bump.
-        let steering_joint = RevoluteJointBuilder::new(Vec3::Y)
+        // 1) chassis ↔ hub: PRISMATIC along chassis-local Y. This is the
+        // suspension travel — the hub can slide up and down relative to
+        // the chassis. A spring+damper motor holds the rover up against
+        // gravity and absorbs bumps. With four independent springs each
+        // wheel can find its own ground height, so the chassis pitches
+        // and rolls over uneven terrain instead of leaving a wheel in
+        // the air. It also removes the over-constraint jitter from
+        // having four rigid contact points on a flat floor — only the
+        // spring length is rigid, the four heights are free to compromise.
+        let suspension = PrismaticJointBuilder::new(Vec3::Y)
             .local_anchor1(offset)
+            .local_anchor2(Vec3::ZERO)
+            .motor_position(0.0, SUSPENSION_STIFFNESS, SUSPENSION_DAMPING)
+            .limits([-SUSPENSION_TRAVEL, SUSPENSION_TRAVEL]);
+
+        let hub = commands
+            .spawn((
+                Transform::from_translation(hub_world_pos),
+                RigidBody::Dynamic,
+                AdditionalMassProperties::MassProperties(MassProperties {
+                    local_center_of_mass: Vec3::ZERO,
+                    mass: 3.0,
+                    principal_inertia: Vec3::splat(0.5),
+                    principal_inertia_local_frame: Quat::IDENTITY,
+                }),
+                Sleeping::disabled(),
+                ImpulseJoint::new(chassis_id, suspension),
+            ))
+            .id();
+
+        // 2) hub ↔ knuckle: REVOLUTE around hub-local Y (steering). The
+        // prismatic joint above locks all rotation between chassis and
+        // hub, so hub-Y == chassis-Y in the world.
+        let steering_joint = RevoluteJointBuilder::new(Vec3::Y)
+            .local_anchor1(Vec3::ZERO)
             .local_anchor2(Vec3::ZERO)
             .motor_position(0.0, STEERING_STIFFNESS, STEERING_DAMPING)
             .limits([-MAX_STEER, MAX_STEER]);
 
         let knuckle = commands
             .spawn((
-                Transform::from_translation(knuckle_world_pos),
+                Transform::from_translation(hub_world_pos),
                 RigidBody::Dynamic,
-                // The knuckle has no collider, so its rotational inertia
-                // would default to zero — which makes the steering motor's
-                // torque produce undefined angular acceleration and locks
-                // the constraint solver. Give it explicit mass + inertia.
                 AdditionalMassProperties::MassProperties(MassProperties {
                     local_center_of_mass: Vec3::ZERO,
-                    mass: 5.0,
-                    principal_inertia: Vec3::splat(1.0),
+                    mass: 3.0,
+                    principal_inertia: Vec3::splat(0.5),
                     principal_inertia_local_frame: Quat::IDENTITY,
                 }),
                 Sleeping::disabled(),
-                ImpulseJoint::new(chassis_id, steering_joint),
+                ImpulseJoint::new(hub, steering_joint),
                 SteeringKnuckle { is_front },
             ))
             .id();
 
-        // Knuckle ↔ wheel: revolute around knuckle-local Z (the spin axis).
-        // When the knuckle is at steering angle 0, its Z is aligned with the
-        // chassis Z (sideways); when steered, the Z axis rotates with it.
+        // 3) knuckle ↔ wheel: REVOLUTE around knuckle-local Z (spin).
         let spin_joint = RevoluteJointBuilder::new(Vec3::Z)
             .local_anchor1(Vec3::ZERO)
             .local_anchor2(Vec3::ZERO)
@@ -335,11 +358,26 @@ struct SteeringKnuckle {
 
 /// Steering geometry constants.
 const MAX_STEER: f32 = 0.5;            // ~28.6° wheel travel each side
-// PD-controller gains for the steering motor. With knuckle inertia ≈ 1
-// kg·m², critical damping is 2·√(K·I) ≈ 2·√300 ≈ 35; we sit slightly
-// over-damped so the wheels settle without overshoot when you let go.
+// PD-controller gains for the steering motor. With knuckle inertia ≈ 0.5
+// kg·m² (now that hub takes some of the linkage mass), critical damping
+// is 2·√(K·I) ≈ 2·√150 ≈ 24; we sit slightly over-damped so the wheels
+// settle without overshoot when you let go.
 const STEERING_STIFFNESS: f32 = 300.0;
 const STEERING_DAMPING: f32 = 50.0;
+
+/// Suspension geometry + PD gains.
+///   - SUSPENSION_TRAVEL: how far the hub can slide each way (m).
+///   - SUSPENSION_STIFFNESS: spring rate per wheel (N/m). Sized so the
+///     rover sags ≈ 6 cm under its own weight at rest.
+///     compression ≈ chassis_weight / (4 · K)
+///                  ≈ (50 · 9.81) / (4 · 2000) ≈ 6.1 cm.
+///   - SUSPENSION_DAMPING: shock-absorber rate (N·s/m). Critical damping
+///     for the per-wheel sprung mass m ≈ 12.5 kg is 2·√(K·m) ≈ 316,
+///     so 400 gives a slightly over-damped ride that absorbs without
+///     bouncing back through the rover frame.
+const SUSPENSION_TRAVEL: f32 = 0.15;
+const SUSPENSION_STIFFNESS: f32 = 2000.0;
+const SUSPENSION_DAMPING: f32 = 400.0;
 
 /// R = respawn upright at the rover's current XZ position (useful for
 /// flipping back over without losing progress across the terrain).
