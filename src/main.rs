@@ -1,6 +1,7 @@
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::input::mouse::{MouseMotion, MouseWheel};
 use bevy::prelude::*;
+use bevy::transform::TransformSystems;
 use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin};
 use bevy_rapier3d::prelude::*;
 
@@ -36,8 +37,15 @@ fn main() {
         .add_systems(Update, drive)
         .add_systems(Update, respawn_rover)
         .add_systems(Update, (update_fps_text, toggle_debug_render, toggle_camera_mode))
-        // Run follow-camera after PanOrbitCamera so we override its Transform write.
-        .add_systems(PostUpdate, follow_camera)
+        // Run follow-camera AFTER transform propagation so the chassis's
+        // GlobalTransform is up to date — otherwise on the frame a freshly
+        // respawned chassis appears, its GlobalTransform is still its
+        // un-propagated local value (near origin) and the camera lerps a
+        // visible jump toward (0,0,0) before snapping back the next frame.
+        .add_systems(
+            PostUpdate,
+            follow_camera.after(TransformSystems::Propagate),
+        )
         .run();
 }
 
@@ -323,16 +331,38 @@ const MAX_STEER: f32 = 0.5;            // ~28.6° wheel travel each side
 const STEERING_STIFFNESS: f32 = 300.0;
 const STEERING_DAMPING: f32 = 50.0;
 
-/// Press R to despawn the rover and spawn a fresh one at the starting position.
-/// DespawnRecursive removes the entity and all its children (wheels, meshes, etc.)
+/// R = respawn upright at the rover's current XZ position (useful for
+/// flipping back over without losing progress across the terrain).
+/// Shift+R = respawn at the world origin (full reset).
 fn respawn_rover(
     mut commands: Commands,
     keyboard: Res<ButtonInput<KeyCode>>,
     rover_query: Query<Entity, With<RoverRoot>>,
+    chassis_xform_q: Query<&GlobalTransform>,
     asset_server: Res<AssetServer>,
     mut chassis_res: ResMut<ChassisEntity>,
 ) {
     if !keyboard.just_pressed(KeyCode::KeyR) { return; }
+
+    let to_origin = keyboard.pressed(KeyCode::ShiftLeft)
+        || keyboard.pressed(KeyCode::ShiftRight);
+
+    // Capture the current chassis location BEFORE despawning. We only use
+    // its XZ — Y is set to a safe clearance above so the fresh rover drops
+    // onto the terrain, and orientation is reset to identity so a flipped
+    // rover lands upright.
+    let spawn_xform = if to_origin {
+        Transform::from_xyz(0.0, 1.5, 0.0)
+    } else if let Some(chassis_id) = chassis_res.0 {
+        if let Ok(gxf) = chassis_xform_q.get(chassis_id) {
+            let p = gxf.translation();
+            Transform::from_xyz(p.x, p.y + 1.5, p.z)
+        } else {
+            Transform::from_xyz(0.0, 1.5, 0.0)
+        }
+    } else {
+        Transform::from_xyz(0.0, 1.5, 0.0)
+    };
 
     // Despawn the old rover and all its children
     for entity in rover_query.iter() {
@@ -342,11 +372,10 @@ fn respawn_rover(
     // Clear the chassis reference so attach_colliders/attach_joints re-run
     chassis_res.0 = None;
 
-    // Spawn a fresh rover
     commands.spawn((
         RoverRoot,
         SceneRoot(asset_server.load("rover_1.glb#Scene0")),
-        Transform::from_xyz(0.0, 1.5, 0.0),
+        spawn_xform,
     ));
 }
 
@@ -433,7 +462,7 @@ fn toggle_camera_mode(
     keyboard: Res<ButtonInput<KeyCode>>,
     mut mode: ResMut<CameraMode>,
     chassis_res: Res<ChassisEntity>,
-    chassis_q: Query<&Transform, (Without<Camera3d>, With<RigidBody>)>,
+    chassis_q: Query<&GlobalTransform, (Without<Camera3d>, With<RigidBody>)>,
     mut camera_q: Query<&mut PanOrbitCamera>,
 ) {
     if !keyboard.just_pressed(KeyCode::KeyC) { return; }
@@ -445,8 +474,8 @@ fn toggle_camera_mode(
     pan_orbit.enabled = matches!(*mode, CameraMode::Orbit);
     if matches!(*mode, CameraMode::Orbit) {
         if let Some(chassis_id) = chassis_res.0 {
-            if let Ok(xform) = chassis_q.get(chassis_id) {
-                pan_orbit.target_focus = xform.translation;
+            if let Ok(gxf) = chassis_q.get(chassis_id) {
+                pan_orbit.target_focus = gxf.translation();
             }
         }
     }
@@ -459,7 +488,11 @@ fn follow_camera(
     time: Res<Time>,
     mode: Res<CameraMode>,
     chassis_res: Res<ChassisEntity>,
-    chassis_q: Query<&Transform, (Without<Camera3d>, With<RigidBody>)>,
+    // The chassis is a child of the rover-root entity in the glTF hierarchy,
+    // so its local Transform is relative to that parent — not world space.
+    // We need GlobalTransform here, otherwise after a respawn at a non-origin
+    // location the camera lerps toward (0,0,0)-relative coordinates.
+    chassis_q: Query<&GlobalTransform, (Without<Camera3d>, With<RigidBody>)>,
     mut camera_q: Query<(&mut Transform, &mut FollowCamera), With<Camera3d>>,
     mouse_buttons: Res<ButtonInput<MouseButton>>,
     mut mouse_motion: MessageReader<MouseMotion>,
@@ -474,7 +507,9 @@ fn follow_camera(
     }
 
     let Some(chassis_id) = chassis_res.0 else { return };
-    let Ok(chassis_xform) = chassis_q.get(chassis_id) else { return };
+    let Ok(chassis_gxf) = chassis_q.get(chassis_id) else { return };
+    let chassis_pos = chassis_gxf.translation();
+    let chassis_rot = chassis_gxf.rotation();
     let Ok((mut cam_xform, mut follow)) = camera_q.single_mut() else { return };
 
     // Accumulate mouse drag (left button held) into yaw/pitch.
@@ -517,7 +552,7 @@ fn follow_camera(
     // only that yaw to place the camera. This way the camera tracks the
     // rover's heading but never inherits its roll or pitch — driving over a
     // crater rim or rolling onto its side won't tilt the camera image.
-    let chassis_fwd = chassis_xform.rotation * Vec3::NEG_X;
+    let chassis_fwd = chassis_rot * Vec3::NEG_X;
     let flat = Vec3::new(chassis_fwd.x, 0.0, chassis_fwd.z);
     let yaw_rot = if flat.length_squared() > 1e-4 {
         let flat = flat.normalize();
@@ -529,12 +564,12 @@ fn follow_camera(
     };
 
     let world_offset = yaw_rot * local_offset;
-    let target_pos = chassis_xform.translation + world_offset;
+    let target_pos = chassis_pos + world_offset;
 
     // Light translation smoothing so suspension bounces glide.
     let alpha = 1.0 - (-time.delta_secs() * 12.0).exp();
     cam_xform.translation = cam_xform.translation.lerp(target_pos, alpha);
 
-    let look_target = chassis_xform.translation + Vec3::Y * 0.5;
+    let look_target = chassis_pos + Vec3::Y * 0.5;
     cam_xform.look_at(look_target, Vec3::Y);
 }
