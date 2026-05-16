@@ -71,6 +71,9 @@ fn setup(
         PanOrbitCamera {
             focus: Vec3::ZERO,
             radius: Some(5.0),
+            // Start disabled because the default camera mode is FollowBehind
+            // — toggle_camera_mode flips this on when the user presses C.
+            enabled: false,
             ..default()
         },
         // Follow-rig state used when CameraMode::FollowBehind is active.
@@ -180,6 +183,11 @@ fn attach_colliders(
                         Quat::IDENTITY,
                         Collider::cuboid(2.775, 1.5, 1.0),
                     )]),
+                    // Rapier puts stationary bodies to sleep to save CPU,
+                    // but a sleeping wheel ignores motor velocity changes
+                    // until something jolts it awake — which makes W/A/S/D
+                    // appear dead when the rover is fully at rest. Disable.
+                    Sleeping::disabled(),
                 ));
                 chassis_res.0 = Some(entity);
             }
@@ -194,6 +202,7 @@ fn attach_colliders(
                     )]),
                     // High friction for knobby off-road tires — more grip, less sliding
                     Friction::coefficient(1.0),
+                    Sleeping::disabled(),
                     Wheel,
                 ));
             }
@@ -292,6 +301,7 @@ fn attach_joints(
                     principal_inertia: Vec3::splat(1.0),
                     principal_inertia_local_frame: Quat::IDENTITY,
                 }),
+                Sleeping::disabled(),
                 ImpulseJoint::new(chassis_id, steering_joint),
                 SteeringKnuckle { is_front },
             ))
@@ -422,8 +432,8 @@ fn toggle_debug_render(
 /// Which camera the player is currently using.
 #[derive(Resource, Default, Clone, Copy, PartialEq, Eq)]
 enum CameraMode {
-    #[default]
     Orbit,
+    #[default]
     FollowBehind,
 }
 
