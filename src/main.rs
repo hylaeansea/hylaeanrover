@@ -6,7 +6,8 @@ use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin};
 use bevy_rapier3d::prelude::*;
 
 mod terrain;
-use terrain::{LunarTerrain, LunarTerrainConfig};
+mod terrain_controls;
+use terrain_controls::{cursor_over_terrain_panel, TerrainControlsPlugin, TerrainPanel};
 
 fn main() {
     App::new()
@@ -25,6 +26,9 @@ fn main() {
         .add_plugins(RapierDebugRenderPlugin::default().disabled())
         // FPS / frame-time diagnostics so the on-screen counter has data
         .add_plugins(FrameTimeDiagnosticsPlugin::default())
+        // Owns the terrain entity lifecycle, the right-side egui panel,
+        // and the rebuild logic when the user tweaks scale or seed.
+        .add_plugins(TerrainControlsPlugin)
         // Initialize the chassis resource as empty — attach_physics will fill it
         .init_resource::<ChassisEntity>()
         .init_resource::<CameraMode>()
@@ -54,10 +58,6 @@ fn setup(
     mut commands: Commands,
     // AssetServer loads files from the assets/ folder
     asset_server: Res<AssetServer>,
-    // Assets<Mesh> and Assets<StandardMaterial> let us create geometry at runtime
-    // ResMut because we're adding new assets, not just reading
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     // --- Camera ---
     // Without a camera, nothing renders. We place it slightly above and behind
@@ -95,40 +95,7 @@ fn setup(
         Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -1.0, 0.5, 0.0)),
     ));
 
-    // --- Lunar Terrain ---
-    // Procedurally generated heightmap: rolling regolith with impact craters.
-    // The visual mesh and the Rapier heightfield collider share the same height
-    // grid, so what you drive on is exactly what you see.
-    let terrain = LunarTerrain::generate(LunarTerrainConfig::default());
-    let n = terrain.resolution;
-    let span = 2.0 * terrain.size;
-    // Rapier's heightfield convention: rows are the Z axis, columns are the X
-    // axis, and the Vec is read in column-major order. Our heights are stored
-    // row-major as `heights[z * n + x]`, so we reorder into [x_outer, z_inner].
-    let mut hf_heights = Vec::with_capacity(n * n);
-    for x in 0..n {
-        for z in 0..n {
-            hf_heights.push(terrain.heights[z * n + x]);
-        }
-    }
-    let heightfield = Collider::heightfield(
-        hf_heights,
-        n, // num_rows -> Z
-        n, // num_cols -> X
-        Vect::new(span, 1.0, span),
-    );
-    commands.spawn((
-        Mesh3d(meshes.add(terrain.build_mesh())),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(0.3, 0.3, 0.3),
-            perceptual_roughness: 0.95,
-            metallic: 0.0,
-            reflectance: 0.2,
-            ..default()
-        })),
-        RigidBody::Fixed,
-        heightfield,
-    ));
+    // Terrain is spawned by TerrainControlsPlugin's startup system.
 
     // --- Rover ---
     // asset_server.load() looks in the assets/ folder. The #Scene0 fragment
@@ -547,6 +514,7 @@ fn follow_camera(
     mouse_buttons: Res<ButtonInput<MouseButton>>,
     mut mouse_motion: MessageReader<MouseMotion>,
     mut scroll: MessageReader<MouseWheel>,
+    panel_q: Query<&bevy::ui::RelativeCursorPosition, With<TerrainPanel>>,
 ) {
     // Drain the readers in orbit mode so we don't accumulate a backlog of
     // mouse deltas to apply on next toggle.
@@ -562,10 +530,14 @@ fn follow_camera(
     let chassis_rot = chassis_gxf.rotation();
     let Ok((mut cam_xform, mut follow)) = camera_q.single_mut() else { return };
 
+    // Ignore mouse input that lands on the terrain panel so dragging a
+    // button or hovering the panel doesn't also rotate the view.
+    let over_ui = cursor_over_terrain_panel(&panel_q);
+
     // Accumulate mouse drag (left button held) into yaw/pitch.
     let mut dx = 0.0_f32;
     let mut dy = 0.0_f32;
-    if mouse_buttons.pressed(MouseButton::Left) {
+    if mouse_buttons.pressed(MouseButton::Left) && !over_ui {
         for ev in mouse_motion.read() {
             dx += ev.delta.x;
             dy += ev.delta.y;
@@ -579,10 +551,15 @@ fn follow_camera(
             .clamp(-1.4, 1.4);
     }
 
-    // Scroll wheel zooms (log-scale for smooth feel).
+    // Scroll wheel zooms (log-scale for smooth feel) — also gated by
+    // cursor-over-panel so scrolling the UI doesn't zoom the rover view.
     let mut s = 0.0_f32;
-    for ev in scroll.read() {
-        s += ev.y;
+    if !over_ui {
+        for ev in scroll.read() {
+            s += ev.y;
+        }
+    } else {
+        scroll.read().count();
     }
     if s != 0.0 {
         follow.distance = (follow.distance * (1.0 - s * follow.zoom_sensitivity))
