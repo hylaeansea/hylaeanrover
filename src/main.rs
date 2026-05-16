@@ -358,12 +358,14 @@ struct SteeringKnuckle {
 
 /// Steering geometry constants.
 const MAX_STEER: f32 = 0.5;            // ~28.6° wheel travel each side
-// PD-controller gains for the steering motor. With knuckle inertia ≈ 0.5
-// kg·m² (now that hub takes some of the linkage mass), critical damping
-// is 2·√(K·I) ≈ 2·√150 ≈ 24; we sit slightly over-damped so the wheels
-// settle without overshoot when you let go.
-const STEERING_STIFFNESS: f32 = 300.0;
-const STEERING_DAMPING: f32 = 50.0;
+// PD-controller gains for the steering motor. Much stiffer than before
+// so the longitudinal friction force at the contact patch can't induce
+// visible toe-in when climbing — a real planetary rover's harmonic-drive
+// steering is effectively non-backdriveable; this is our approximation.
+// With knuckle inertia ≈ 0.5 kg·m², critical damping is 2·√(K·I) ≈
+// 2·√1500 ≈ 77; 150 sits comfortably over-damped.
+const STEERING_STIFFNESS: f32 = 3000.0;
+const STEERING_DAMPING: f32 = 150.0;
 
 /// Suspension geometry + PD gains.
 ///   - SUSPENSION_TRAVEL: how far the hub can slide each way (m).
@@ -375,7 +377,7 @@ const STEERING_DAMPING: f32 = 50.0;
 ///     for the per-wheel sprung mass m ≈ 12.5 kg is 2·√(K·m) ≈ 316,
 ///     so 400 gives a slightly over-damped ride that absorbs without
 ///     bouncing back through the rover frame.
-const SUSPENSION_TRAVEL: f32 = 0.15;
+const SUSPENSION_TRAVEL: f32 = 0.35;
 const SUSPENSION_STIFFNESS: f32 = 2000.0;
 const SUSPENSION_DAMPING: f32 = 400.0;
 
