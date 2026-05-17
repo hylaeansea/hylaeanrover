@@ -26,14 +26,18 @@ pub struct LunarTerrainConfig {
 
 impl Default for LunarTerrainConfig {
     fn default() -> Self {
-        // 11×11 of the original 50m footprint → 550m × 550m total.
-        // Resolution chosen to keep cell size near 1m so heightfield
-        // collisions stay reasonable on this larger area.
+        // 9× the previous half-extent → ~5 km arena. The terrain is set
+        // up like a single giant impact crater: a roughly flat floor for
+        // the inner ~85% of the radius, with a tall steep rim around the
+        // edge that the rover physically can't climb out of (see
+        // `stamp_bowl_rim`). Resolution chosen to keep cell size ≈ 6 m so
+        // the heightfield collider stays tractable on this much larger
+        // area without smearing out the local crater detail.
         Self {
             seed: 42,
-            size: 275.0,
-            resolution: 513,
-            crater_count: 180,
+            size: 2475.0,
+            resolution: 1024,
+            crater_count: 1000,
         }
     }
 }
@@ -76,21 +80,30 @@ impl LunarTerrain {
         }
 
         // Stamp impact craters with parabolic bowls and gaussian rims.
-        // Radii roughly track terrain size so a larger map gets larger craters.
-        let max_radius = (size * 0.12).max(5.0);
-        let min_radius = max_radius * 0.2;
+        // Radii are uniform in [min_radius, max_radius]; depth is sampled
+        // independently in an absolute range and is *not* tied to radius.
+        // (Real impact craters have a similar property — large craters
+        // are shallow relative to their width, small ones are deep
+        // relative to their width.) Centres are scattered across the full
+        // terrain square so coverage runs all the way to the mesh edges.
+        let max_radius: f32 = 300.0;
+        let min_radius: f32 = 18.0;
         for _ in 0..crater_count {
-            let cx = rng.gen_range(-size * 0.85..size * 0.85);
-            let cz = rng.gen_range(-size * 0.85..size * 0.85);
+            let cx = rng.gen_range(-size..size);
+            let cz = rng.gen_range(-size..size);
             let radius = rng.gen_range(min_radius..max_radius);
-            let depth = rng.gen_range(0.18..0.45) * radius;
+            let depth: f32 = rng.gen_range(2.0..15.0);
             stamp_crater(&mut heights, n, size, cx, cz, radius, depth);
         }
 
-        // Clear a flat landing pad around the origin so the rover doesn't
-        // spawn embedded in a crater wall.
-        let pad_radius = 6.0;
-        let pad_falloff = 4.0;
+        // Flatten a landing pad around the origin BEFORE stamping the big
+        // arena crater. This way the multiply-by-blend wipes the local
+        // noise + small craters to zero, and the arena crater then dishes
+        // the whole region (pad included) down to its bowl floor — so the
+        // pad ends up as a small flat plateau referenced to the bottom of
+        // the giant crater, not a pillar at the original sea level.
+        let pad_radius = 30.0;
+        let pad_falloff = 100.0;
         for z in 0..n {
             let wz = (z as f32 / (n - 1) as f32) * 2.0 * size - size;
             for x in 0..n {
@@ -103,6 +116,22 @@ impl LunarTerrain {
                 }
             }
         }
+
+        // Arena-spanning fixed crater centred on the landing platform.
+        // Uses the same `stamp_crater` math as the small random craters,
+        // just with one fixed instance at origin. Radius = 0.8 × size,
+        // depth = 0.1 × diameter.
+        let arena_crater_radius = 0.8 * size;
+        let arena_crater_depth = 0.075 * (2.0 * arena_crater_radius);
+        stamp_crater(
+            &mut heights,
+            n,
+            size,
+            0.0,
+            0.0,
+            arena_crater_radius,
+            arena_crater_depth,
+        );
 
         Self { size, resolution: n, heights }
     }
@@ -189,6 +218,7 @@ impl LunarTerrain {
         mesh
     }
 }
+
 
 fn stamp_crater(
     heights: &mut [f32],

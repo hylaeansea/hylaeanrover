@@ -47,6 +47,7 @@ fn main() {
         .add_systems(Update, (attach_colliders, attach_joints).chain())
         .add_systems(Update, drive)
         .add_systems(Update, respawn_rover)
+        .add_systems(Update, spawn_initial_rover)
         .add_systems(Update, (update_fps_text, toggle_debug_render, toggle_camera_mode))
         // Run follow-camera AFTER transform propagation so the chassis's
         // GlobalTransform is up to date — otherwise on the frame a freshly
@@ -63,8 +64,6 @@ fn main() {
 fn setup(
     // Commands lets us spawn entities into the world
     mut commands: Commands,
-    // AssetServer loads files from the assets/ folder
-    asset_server: Res<AssetServer>,
 ) {
     // --- Camera ---
     // Without a camera, nothing renders. We place it slightly above and behind
@@ -111,17 +110,38 @@ fn setup(
 
     // Terrain is spawned by TerrainControlsPlugin's startup system.
 
-    // --- Rover ---
-    // asset_server.load() looks in the assets/ folder. The #Scene0 fragment
-    // selects the first scene from the glTF file — this is your entire Blender
-    // scene graph (chassis, wheels, etc.) preserved as a hierarchy.
-    // SceneRoot spawns all those nodes as children of this entity.
-    // Lift the rover up so it spawns above the ground and falls onto it
+    // The rover is spawned by `spawn_initial_rover` once the terrain
+    // resource is available — that way we can place it just above the
+    // landing pad (which is at the bottom of the giant arena crater)
+    // instead of dropping it from y = 1.5 in world space and watching
+    // it free-fall 300 m.
+}
+
+/// Clearance above the local terrain at which the rover is spawned. The
+/// rover then settles onto the surface under gravity.
+const ROVER_SPAWN_CLEARANCE: f32 = 1.5;
+
+/// Spawns the rover the first frame the `TerrainState` resource is
+/// available, placing it `ROVER_SPAWN_CLEARANCE` above whatever the
+/// terrain height is at the origin (i.e., the landing pad).
+fn spawn_initial_rover(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    terrain: Option<Res<terrain_controls::TerrainState>>,
+    existing: Query<(), With<RoverRoot>>,
+    mut done: Local<bool>,
+) {
+    if *done || !existing.is_empty() {
+        return;
+    }
+    let Some(terrain) = terrain else { return };
+    let pad_height = terrain.height_at(0.0, 0.0);
     commands.spawn((
         RoverRoot,
         SceneRoot(asset_server.load("rover_1.glb#Scene0")),
-        Transform::from_xyz(0.0, 1.5, 0.0),
+        Transform::from_xyz(0.0, pad_height + ROVER_SPAWN_CLEARANCE, 0.0),
     ));
+    *done = true;
 }
 
 /// Marker component on the rover root entity so we can find it to despawn
@@ -382,27 +402,32 @@ fn respawn_rover(
     chassis_xform_q: Query<&GlobalTransform>,
     asset_server: Res<AssetServer>,
     mut chassis_res: ResMut<ChassisEntity>,
+    terrain: Option<Res<terrain_controls::TerrainState>>,
 ) {
     if !keyboard.just_pressed(KeyCode::KeyR) { return; }
 
     let to_origin = keyboard.pressed(KeyCode::ShiftLeft)
         || keyboard.pressed(KeyCode::ShiftRight);
 
-    // Capture the current chassis location BEFORE despawning. We only use
-    // its XZ — Y is set to a safe clearance above so the fresh rover drops
-    // onto the terrain, and orientation is reset to identity so a flipped
-    // rover lands upright.
+    // Origin respawn: place the rover above the landing pad at the
+    // bottom of the giant crater (not world y = 1.5, which is way above
+    // the floor now). Current-location respawn: keep XZ, just lift Y by
+    // a clearance so a flipped rover lands upright.
+    let pad_y = terrain
+        .as_ref()
+        .map(|t| t.height_at(0.0, 0.0))
+        .unwrap_or(0.0);
     let spawn_xform = if to_origin {
-        Transform::from_xyz(0.0, 1.5, 0.0)
+        Transform::from_xyz(0.0, pad_y + ROVER_SPAWN_CLEARANCE, 0.0)
     } else if let Some(chassis_id) = chassis_res.0 {
         if let Ok(gxf) = chassis_xform_q.get(chassis_id) {
             let p = gxf.translation();
-            Transform::from_xyz(p.x, p.y + 1.5, p.z)
+            Transform::from_xyz(p.x, p.y + ROVER_SPAWN_CLEARANCE, p.z)
         } else {
-            Transform::from_xyz(0.0, 1.5, 0.0)
+            Transform::from_xyz(0.0, pad_y + ROVER_SPAWN_CLEARANCE, 0.0)
         }
     } else {
-        Transform::from_xyz(0.0, 1.5, 0.0)
+        Transform::from_xyz(0.0, pad_y + ROVER_SPAWN_CLEARANCE, 0.0)
     };
 
     // Despawn the old rover and all its children

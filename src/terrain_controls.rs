@@ -52,6 +52,38 @@ pub struct TerrainState {
     pub mesh_handle: Option<Handle<Mesh>>,
 }
 
+impl TerrainState {
+    /// Bilinear height lookup in world space. Multiplies by `height_scale`
+    /// so the returned value matches what's actually being rendered /
+    /// collided against right now. Returns 0 outside the terrain footprint.
+    pub fn height_at(&self, x: f32, z: f32) -> f32 {
+        let n = self.resolution;
+        if n < 2 {
+            return 0.0;
+        }
+        let u = (x + self.size) / (2.0 * self.size);
+        let v = (z + self.size) / (2.0 * self.size);
+        if !(0.0..=1.0).contains(&u) || !(0.0..=1.0).contains(&v) {
+            return 0.0;
+        }
+        let fx = u * (n - 1) as f32;
+        let fz = v * (n - 1) as f32;
+        let x0 = (fx.floor() as usize).min(n - 1);
+        let z0 = (fz.floor() as usize).min(n - 1);
+        let x1 = (x0 + 1).min(n - 1);
+        let z1 = (z0 + 1).min(n - 1);
+        let tx = fx - x0 as f32;
+        let tz = fz - z0 as f32;
+        let h00 = self.base_heights[z0 * n + x0];
+        let h10 = self.base_heights[z0 * n + x1];
+        let h01 = self.base_heights[z1 * n + x0];
+        let h11 = self.base_heights[z1 * n + x1];
+        let h0 = h00 * (1.0 - tx) + h10 * tx;
+        let h1 = h01 * (1.0 - tx) + h11 * tx;
+        (h0 * (1.0 - tz) + h1 * tz) * self.height_scale
+    }
+}
+
 // --- UI marker components ---
 #[derive(Component, Clone, Copy)]
 enum ScaleButton {
