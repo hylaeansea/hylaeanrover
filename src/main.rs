@@ -1,12 +1,17 @@
+use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::input::mouse::{MouseMotion, MouseWheel};
+use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
+use bevy::render::view::Hdr;
 use bevy::transform::TransformSystems;
 use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin};
 use bevy_rapier3d::prelude::*;
 
+mod power_cubes;
 mod terrain;
 mod terrain_controls;
+use power_cubes::PowerCubesPlugin;
 use terrain_controls::{cursor_over_terrain_panel, TerrainControlsPlugin, TerrainPanel};
 
 fn main() {
@@ -29,6 +34,8 @@ fn main() {
         // Owns the terrain entity lifecycle, the right-side egui panel,
         // and the rebuild logic when the user tweaks scale or seed.
         .add_plugins(TerrainControlsPlugin)
+        // Glowing blue cubes that spawn on a Poisson process across the map.
+        .add_plugins(PowerCubesPlugin)
         // Initialize the chassis resource as empty — attach_physics will fill it
         .init_resource::<ChassisEntity>()
         .init_resource::<CameraMode>()
@@ -64,6 +71,13 @@ fn setup(
     // the origin, pointed at (0,0,0) where the rover will spawn.
     commands.spawn((
         Camera3d::default(),
+        // HDR is its own marker component in Bevy 0.18. Required for the
+        // bloom post-process pass — without it, emissive values > 1.0 in
+        // linear RGB get clipped instead of glowing.
+        Hdr,
+        // Tonemapping maps the HDR output back to displayable LDR.
+        Tonemapping::TonyMcMapface,
+        Bloom::NATURAL,
         // PanOrbitCamera takes over the Transform — we configure it here instead.
         // focus = what point the camera orbits around (the origin, where the rover is)
         // radius = distance from that point (how zoomed in/out)
@@ -114,10 +128,11 @@ fn setup(
 #[derive(Component)]
 struct RoverRoot;
 
-/// Stores the chassis Entity so wheels can create joints back to it.
-/// Option<Entity> because it starts as None until the chassis is found.
+/// Stores the chassis Entity so wheels can create joints back to it,
+/// the follow camera can target it, and the power system can read its
+/// position. `pub` so submodules can `use crate::ChassisEntity`.
 #[derive(Resource, Default)]
-struct ChassisEntity(Option<Entity>);
+pub struct ChassisEntity(pub Option<Entity>);
 
 /// Wheel positions relative to the chassis origin, in Bevy coordinates.
 /// Derived from Blender scene data via MCP:
@@ -186,11 +201,20 @@ fn drive(
     keyboard: Res<ButtonInput<KeyCode>>,
     mut wheel_joints: Query<&mut ImpulseJoint, (With<Wheel>, Without<SteeringKnuckle>)>,
     mut knuckle_joints: Query<(&SteeringKnuckle, &mut ImpulseJoint), Without<Wheel>>,
+    power: Res<power_cubes::PowerState>,
 ) {
     // --- Throttle ---
-    let throttle = if keyboard.pressed(KeyCode::KeyW) { 10.0 }
-        else if keyboard.pressed(KeyCode::KeyS) { -10.0 }
-        else { 0.0 };
+    // No power → wheels can't spin. Steering still works so you can
+    // straighten up before coming to rest.
+    let throttle = if !power.has_power() {
+        0.0
+    } else if keyboard.pressed(KeyCode::KeyW) {
+        10.0
+    } else if keyboard.pressed(KeyCode::KeyS) {
+        -10.0
+    } else {
+        0.0
+    };
 
     for mut joint in wheel_joints.iter_mut() {
         if let TypedJoint::RevoluteJoint(ref mut revolute) = joint.data {
