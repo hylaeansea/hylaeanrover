@@ -22,7 +22,11 @@ use crate::ChassisEntity;
 const SPAWN_LAMBDA: f32 = 0.05;
 const CUBE_HALF_EXTENT: f32 = 0.35;
 const SPAWN_HEIGHT: f32 = 40.0;
-const EDGE_MARGIN_FRAC: f32 = 0.9;
+/// Maximum |x| / |z| (meters) at which a cube may spawn. Decoupled from
+/// terrain size: the arena is now ~5 km, but a cube 2 km away is
+/// effectively unreachable on one battery, so we hold spawns inside
+/// reasonable round-trip range of the origin.
+const SPAWN_EXTENT: f32 = 500.0;
 
 /// Total reserve at startup (Watt-hours). 1 kWh.
 const POWER_MAX: f32 = 1000.0;
@@ -240,10 +244,14 @@ fn spawn_power_cubes(
     let u: f32 = rng.gen_range(f32::EPSILON..1.0_f32);
     spawner.time_to_next = -u.ln() / SPAWN_LAMBDA;
 
+    // Need the terrain to exist so we know the heightfield is ready and
+    // so we can spawn cubes a small fixed height *above the local
+    // terrain* rather than at a world-space y. Otherwise on the new big
+    // crater map they fall ~300 m and hit at terminal velocity.
     let Some(terrain) = terrain.as_ref() else { return };
-    let extent = terrain.size * EDGE_MARGIN_FRAC;
-    let x: f32 = rng.gen_range(-extent..extent);
-    let z: f32 = rng.gen_range(-extent..extent);
+    let x: f32 = rng.gen_range(-SPAWN_EXTENT..SPAWN_EXTENT);
+    let z: f32 = rng.gen_range(-SPAWN_EXTENT..SPAWN_EXTENT);
+    let local_y = terrain.height_at(x, z);
 
     let spin = Vec3::new(
         rng.gen_range(-1.0..1.0),
@@ -264,7 +272,7 @@ fn spawn_power_cubes(
     commands.spawn((
         Mesh3d(assets.mesh.clone()),
         MeshMaterial3d(material),
-        Transform::from_xyz(x, SPAWN_HEIGHT, z),
+        Transform::from_xyz(x, local_y + SPAWN_HEIGHT, z),
         RigidBody::Dynamic,
         Collider::cuboid(CUBE_HALF_EXTENT, CUBE_HALF_EXTENT, CUBE_HALF_EXTENT),
         Friction::coefficient(0.5),
