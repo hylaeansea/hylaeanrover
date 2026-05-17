@@ -242,6 +242,8 @@ fn drive(
     mut wheel_joints: Query<&mut ImpulseJoint, (With<Wheel>, Without<SteeringKnuckle>)>,
     mut knuckle_joints: Query<(&SteeringKnuckle, &mut ImpulseJoint), Without<Wheel>>,
     power: Res<power_cubes::PowerState>,
+    chassis_res: Res<ChassisEntity>,
+    chassis_vel_q: Query<&Velocity>,
 ) {
     // --- Throttle ---
     // No power → wheels can't spin. Steering still works so you can
@@ -265,9 +267,25 @@ fn drive(
     // --- Steering ---
     // A = +angle on the front knuckles, -angle on the rear (opposite phase).
     // D mirrors that. No input → target 0 and the motor springs back to center.
-    let steer = if keyboard.pressed(KeyCode::KeyA) { MAX_STEER }
-        else if keyboard.pressed(KeyCode::KeyD) { -MAX_STEER }
-        else { 0.0 };
+    //
+    // The commanded angle tapers gently with speed: full MAX_STEER at rest,
+    // STEER_SPEED_FLOOR × MAX_STEER once you're at STEER_SPEED_REF and
+    // above. Keeps low-speed turning sharp while preventing twitchy
+    // over-steer when you're already moving.
+    let speed = chassis_res
+        .0
+        .and_then(|e| chassis_vel_q.get(e).ok())
+        .map(|v| v.linvel.length())
+        .unwrap_or(0.0);
+    let t = (speed / STEER_SPEED_REF).clamp(0.0, 1.0);
+    let scale = 1.0 - (1.0 - STEER_SPEED_FLOOR) * t;
+    let steer = if keyboard.pressed(KeyCode::KeyA) {
+        MAX_STEER * scale
+    } else if keyboard.pressed(KeyCode::KeyD) {
+        -MAX_STEER * scale
+    } else {
+        0.0
+    };
 
     for (knuckle, mut joint) in knuckle_joints.iter_mut() {
         let target = if knuckle.is_front { steer } else { -steer };
@@ -276,6 +294,12 @@ fn drive(
         }
     }
 }
+
+/// Speed (m/s) at which the steering taper reaches its floor.
+const STEER_SPEED_REF: f32 = 10.0;
+/// Fraction of MAX_STEER applied at and above STEER_SPEED_REF.
+/// 1.0 = no taper, 0.0 = full lock-out. 0.75 is subtle but noticeable.
+const STEER_SPEED_FLOOR: f32 = 0.75;
 
 /// Separate system that attaches joints. Runs after attach_colliders.
 /// Looks for wheel entities that have a Collider but no ImpulseJoint yet.

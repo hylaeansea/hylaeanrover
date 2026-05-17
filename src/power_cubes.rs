@@ -32,6 +32,10 @@ const SPAWN_EXTENT: f32 = 500.0;
 const POWER_MAX: f32 = 1000.0;
 /// Energy consumed per meter of chassis travel (Wh/m).
 const DRAIN_PER_METER: f32 = 0.5;
+/// When the rover is coasting (moving but the player isn't pressing W/S),
+/// this fraction of the would-be drain is *added* to the battery instead
+/// of subtracted — i.e. regenerative braking at 20% efficiency.
+const REGEN_EFFICIENCY: f32 = 0.2;
 /// How much energy each cube grants (Wh).
 const CUBE_VALUE: f32 = 100.0;
 /// Distance (m) from chassis at which a cube starts being absorbed.
@@ -341,6 +345,7 @@ fn consume_power_from_motion(
     chassis_res: Res<ChassisEntity>,
     xforms: Query<&GlobalTransform>,
     mut power: ResMut<PowerState>,
+    keyboard: Res<ButtonInput<KeyCode>>,
 ) {
     let Some(chassis_id) = chassis_res.0 else {
         power.last_chassis_pos = None;
@@ -351,11 +356,24 @@ fn consume_power_from_motion(
     };
     let pos = chassis_gxf.translation();
 
+    // We're "throttling" if the player is actively asking the motor to
+    // spin the wheels and there's energy to do it. If they're coasting
+    // (no input, or out of power) but the rover is still moving, we
+    // treat the motion as regenerative — sliding wheels can charge the
+    // battery at REGEN_EFFICIENCY of the equivalent drive cost.
+    let throttling = power.has_power()
+        && (keyboard.pressed(KeyCode::KeyW) || keyboard.pressed(KeyCode::KeyS));
+
     if let Some(last) = power.last_chassis_pos {
         let dist = (pos - last).length();
         if dist.is_finite() && dist > 0.0 {
-            let drain = dist * DRAIN_PER_METER;
-            power.current = (power.current - drain).max(0.0);
+            let delta_wh = dist * DRAIN_PER_METER;
+            if throttling {
+                power.current = (power.current - delta_wh).max(0.0);
+            } else {
+                power.current =
+                    (power.current + delta_wh * REGEN_EFFICIENCY).min(power.max);
+            }
         }
     }
     power.last_chassis_pos = Some(pos);
