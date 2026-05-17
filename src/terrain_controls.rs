@@ -171,6 +171,10 @@ fn setup_terrain(
             MeshMaterial3d(material_handle),
             RigidBody::Fixed,
             collider,
+            // Sandy regolith — bumps the contact friction with the wheels
+            // up from the Rapier default of 0.5 so the rover digs in
+            // rather than skating across the surface.
+            Friction::coefficient(1.5),
             TerrainEntity,
         ))
         .id();
