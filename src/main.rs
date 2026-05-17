@@ -48,6 +48,7 @@ fn main() {
         .add_systems(Update, drive)
         .add_systems(Update, respawn_rover)
         .add_systems(Update, spawn_initial_rover)
+        .add_systems(Update, handle_relaunch_event)
         .add_systems(Update, (update_fps_text, toggle_debug_render, toggle_camera_mode))
         // Run follow-camera AFTER transform propagation so the chassis's
         // GlobalTransform is up to date — otherwise on the frame a freshly
@@ -129,9 +130,8 @@ fn spawn_initial_rover(
     asset_server: Res<AssetServer>,
     terrain: Option<Res<terrain_controls::TerrainState>>,
     existing: Query<(), With<RoverRoot>>,
-    mut done: Local<bool>,
 ) {
-    if *done || !existing.is_empty() {
+    if !existing.is_empty() {
         return;
     }
     let Some(terrain) = terrain else { return };
@@ -141,12 +141,11 @@ fn spawn_initial_rover(
         SceneRoot(asset_server.load("rover_1.glb#Scene0")),
         Transform::from_xyz(0.0, pad_height + ROVER_SPAWN_CLEARANCE, 0.0),
     ));
-    *done = true;
 }
 
-/// Marker component on the rover root entity so we can find it to despawn
+/// Marker component on the rover root entity so we can find it to despawn.
 #[derive(Component)]
-struct RoverRoot;
+pub struct RoverRoot;
 
 /// Stores the chassis Entity so wheels can create joints back to it,
 /// the follow camera can target it, and the power system can read its
@@ -175,6 +174,18 @@ fn attach_colliders(
     query: Query<(Entity, &Name), Without<Collider>>,
     mut chassis_res: ResMut<ChassisEntity>,
 ) {
+    // Rover parts (chassis + wheels) sit in their own collision group
+    // whose filter excludes itself. Why: the wheel cylinder colliders
+    // overlap the chassis cuboid by ~1 m in X and Y at their joints,
+    // and Rapier doesn't auto-disable contacts between
+    // chain-joint-connected bodies. Without this, every frame Rapier
+    // generates a separation impulse between wheel and chassis that
+    // fights the suspension/steering joints — visible as wheel jitter.
+    // Putting them in a self-excluding group means rover-internal
+    // colliders simply don't pair, while terrain and cubes (default
+    // group = ALL, filter = ALL) still collide with them normally.
+    let rover_groups = CollisionGroups::new(ROVER_GROUP, Group::ALL.difference(ROVER_GROUP));
+
     for (entity, name) in query.iter() {
         match name.as_str() {
             "chassis" => {
@@ -190,6 +201,7 @@ fn attach_colliders(
                     // until something jolts it awake — which makes W/A/S/D
                     // appear dead when the rover is fully at rest. Disable.
                     Sleeping::disabled(),
+                    rover_groups,
                 ));
                 chassis_res.0 = Some(entity);
             }
@@ -202,9 +214,13 @@ fn attach_colliders(
                         wheel_rotation,
                         Collider::cylinder(0.68, 1.12),
                     )]),
-                    // High friction for knobby off-road tires — more grip, less sliding
-                    Friction::coefficient(1.0),
+                    // High friction for knobby off-road tires. Combined
+                    // with the terrain's 1.5 friction (Rapier averages
+                    // the two), the effective μ ≈ 2.0 — feels like
+                    // driving through compacted sand, not skating on ice.
+                    Friction::coefficient(2.5),
                     Sleeping::disabled(),
+                    rover_groups,
                     Wheel,
                 ));
             }
@@ -212,6 +228,10 @@ fn attach_colliders(
         }
     }
 }
+
+/// Collision group used by every rover collider; its filter is set to
+/// everything *except* this group so the rover never contacts itself.
+const ROVER_GROUP: Group = Group::GROUP_1;
 
 /// Reads keyboard input and drives the rover.
 /// W/S = throttle (spin all wheels forward/reverse).
@@ -369,14 +389,15 @@ struct SteeringKnuckle {
 
 /// Steering geometry constants.
 const MAX_STEER: f32 = 0.5;            // ~28.6° wheel travel each side
-// PD-controller gains for the steering motor. Much stiffer than before
-// so the longitudinal friction force at the contact patch can't induce
-// visible toe-in when climbing — a real planetary rover's harmonic-drive
-// steering is effectively non-backdriveable; this is our approximation.
-// With knuckle inertia ≈ 0.5 kg·m², critical damping is 2·√(K·I) ≈
-// 2·√1500 ≈ 77; 150 sits comfortably over-damped.
-const STEERING_STIFFNESS: f32 = 3000.0;
-const STEERING_DAMPING: f32 = 150.0;
+// PD-controller gains for the steering motor. Sized as a compromise:
+// stiff enough that contact forces don't visibly toe the wheels in
+// (which they did at K = 300), but soft enough that the chassis isn't
+// yanked into the steering instead of the knuckle (which happened at
+// K = 3000). With knuckle inertia ≈ 0.5 kg·m², critical damping is
+// 2·√(K·I) ≈ 2·√600 ≈ 49; 70 sits slightly over-damped so the wheels
+// don't oscillate when you release.
+const STEERING_STIFFNESS: f32 = 2000.0;
+const STEERING_DAMPING: f32 = 170.0;
 
 /// Suspension geometry + PD gains.
 ///   - SUSPENSION_TRAVEL: how far the hub can slide each way (m).
@@ -648,4 +669,23 @@ fn follow_camera(
 
     let look_target = chassis_pos + Vec3::Y * 0.5;
     cam_xform.look_at(look_target, Vec3::Y);
+}
+
+/// Listens for `RelaunchEvent` fired by the game-over splash's button.
+/// Despawns the old rover and clears the chassis reference; the next
+/// `spawn_initial_rover` tick will then re-spawn at the landing pad.
+/// (Power has already been topped up by the button handler.)
+fn handle_relaunch_event(
+    mut commands: Commands,
+    mut events: MessageReader<power_cubes::RelaunchEvent>,
+    rover_q: Query<Entity, With<RoverRoot>>,
+    mut chassis_res: ResMut<ChassisEntity>,
+) {
+    if events.read().count() == 0 {
+        return;
+    }
+    for entity in rover_q.iter() {
+        commands.entity(entity).despawn();
+    }
+    chassis_res.0 = None;
 }
