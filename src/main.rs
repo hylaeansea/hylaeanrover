@@ -9,10 +9,12 @@ use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin};
 use bevy_rapier3d::prelude::*;
 
 mod beacons;
+mod minerals;
 mod power_cubes;
 mod terrain;
 mod terrain_controls;
 use beacons::BeaconsPlugin;
+use minerals::MineralsPlugin;
 use power_cubes::PowerCubesPlugin;
 use terrain_controls::{cursor_over_terrain_panel, TerrainControlsPlugin, TerrainPanel};
 
@@ -40,6 +42,8 @@ fn main() {
         .add_plugins(PowerCubesPlugin)
         // Press B to drop a survey beacon glTF behind the rover.
         .add_plugins(BeaconsPlugin)
+        // Surface + subsurface mineral maps, drive-by sampler, HUD readout.
+        .add_plugins(MineralsPlugin)
         // Initialize the chassis resource as empty — attach_physics will fill it
         .init_resource::<ChassisEntity>()
         .init_resource::<CameraMode>()
