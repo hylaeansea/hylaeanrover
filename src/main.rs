@@ -128,10 +128,11 @@ fn setup(
 #[derive(Component)]
 struct RoverRoot;
 
-/// Stores the chassis Entity so wheels can create joints back to it.
-/// Option<Entity> because it starts as None until the chassis is found.
+/// Stores the chassis Entity so wheels can create joints back to it,
+/// the follow camera can target it, and the power system can read its
+/// position. `pub` so submodules can `use crate::ChassisEntity`.
 #[derive(Resource, Default)]
-struct ChassisEntity(Option<Entity>);
+pub struct ChassisEntity(pub Option<Entity>);
 
 /// Wheel positions relative to the chassis origin, in Bevy coordinates.
 /// Derived from Blender scene data via MCP:
@@ -200,11 +201,20 @@ fn drive(
     keyboard: Res<ButtonInput<KeyCode>>,
     mut wheel_joints: Query<&mut ImpulseJoint, (With<Wheel>, Without<SteeringKnuckle>)>,
     mut knuckle_joints: Query<(&SteeringKnuckle, &mut ImpulseJoint), Without<Wheel>>,
+    power: Res<power_cubes::PowerState>,
 ) {
     // --- Throttle ---
-    let throttle = if keyboard.pressed(KeyCode::KeyW) { 10.0 }
-        else if keyboard.pressed(KeyCode::KeyS) { -10.0 }
-        else { 0.0 };
+    // No power → wheels can't spin. Steering still works so you can
+    // straighten up before coming to rest.
+    let throttle = if !power.has_power() {
+        0.0
+    } else if keyboard.pressed(KeyCode::KeyW) {
+        10.0
+    } else if keyboard.pressed(KeyCode::KeyS) {
+        -10.0
+    } else {
+        0.0
+    };
 
     for mut joint in wheel_joints.iter_mut() {
         if let TypedJoint::RevoluteJoint(ref mut revolute) = joint.data {
