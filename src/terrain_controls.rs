@@ -159,7 +159,12 @@ fn setup_terrain(
     let (mesh, collider) = build_mesh_and_collider(&state);
     let mesh_handle = meshes.add(mesh);
     let material_handle = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.3, 0.3, 0.3),
+        // White base_color so per-vertex colors drive the displayed
+        // shade. terrain::build_mesh seeds every vertex grey, so the
+        // off-state still looks like the old regolith; the minerals
+        // module overrides individual vertices to colour-code element
+        // concentrations.
+        base_color: Color::WHITE,
         perceptual_roughness: 0.95,
         metallic: 0.0,
         reflectance: 0.2,
