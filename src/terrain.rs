@@ -211,9 +211,15 @@ impl LunarTerrain {
             PrimitiveTopology::TriangleList,
             RenderAssetUsages::default(),
         );
+        // Default per-vertex colour = regolith grey. The minerals module
+        // overwrites this attribute when the user toggles an element
+        // overlay; without that, the displayed colour is just
+        // material.base_color (white) × vertex_color (grey) = grey.
+        let colors: Vec<[f32; 4]> = vec![[0.30, 0.30, 0.30, 1.0]; positions.len()];
         mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
         mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
         mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
         mesh.insert_indices(Indices::U32(indices));
         mesh
     }
