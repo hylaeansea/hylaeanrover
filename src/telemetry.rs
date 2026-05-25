@@ -179,6 +179,7 @@ fn format_telemetry_json(
         GameStatus::Playing => None,
         GameStatus::GameOver(GameOverReason::OutOfPower) => Some("out_of_power"),
         GameStatus::GameOver(GameOverReason::Flipped) => Some("flipped"),
+        GameStatus::GameOver(GameOverReason::BeaconsDeployed) => Some("beacons_deployed"),
     };
 
     let observation = Observation {

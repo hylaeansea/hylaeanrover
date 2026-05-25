@@ -153,7 +153,6 @@ const MAP_SIZE: f32 = 2475.0;
 /// 257² cells — minerals vary smoothly over tens of meters, far coarser
 /// than the height field.
 const MAP_RESOLUTION: usize = 257;
-const MAP_SEED: u64 = 7;
 
 // ----- HUD palette (kept in sync with the other panels) -------------------
 const PANEL_BG: Color = Color::srgba(0.03, 0.05, 0.08, 0.82);
@@ -320,12 +319,22 @@ pub struct MineralsPlugin;
 
 impl Plugin for MineralsPlugin {
     fn build(&self, app: &mut App) {
-        app.insert_resource(MineralMaps::generate(MAP_SEED, MAP_SIZE, MAP_RESOLUTION))
-            .init_resource::<MineralOverlay>()
+        app.init_resource::<MineralOverlay>()
+            // Generate from `TerrainState.seed` so a single seed
+            // controls both the heightfield and the mineral
+            // distribution. Has to be PostStartup, not Startup —
+            // terrain_controls's `setup_terrain` is what inserts
+            // `TerrainState`, and Bevy parallelizes Startup systems so
+            // ordering inside it isn't guaranteed. PostStartup runs
+            // strictly after every Startup system finishes.
+            // `regenerate_on_seed_change` then keeps the maps in sync
+            // if the user clicks "Randomize seed" later.
+            .add_systems(PostStartup, generate_initial_maps)
             .add_systems(Startup, setup_mineral_ui.in_set(LeftSidebarSet::Mineral))
             .add_systems(
                 Update,
                 (
+                    regenerate_on_seed_change,
                     sync_mineral_ui,
                     handle_overlay_buttons,
                     sync_row_highlight,
@@ -333,6 +342,50 @@ impl Plugin for MineralsPlugin {
                 ),
             );
     }
+}
+
+// ----- Seed wiring --------------------------------------------------------
+
+/// Build the initial maps from whatever seed `TerrainState` already has.
+/// Startup runs after `Plugin::build` resource inserts, so `TerrainState`
+/// (init_resource'd by TerrainControlsPlugin) exists by the time this
+/// fires.
+fn generate_initial_maps(
+    mut commands: Commands,
+    terrain: Res<crate::terrain_controls::TerrainState>,
+) {
+    commands.insert_resource(MineralMaps::generate(
+        terrain.seed,
+        MAP_SIZE,
+        MAP_RESOLUTION,
+    ));
+}
+
+/// If `TerrainState.seed` ever changes (Randomize Seed button), tear
+/// down the existing `MineralMaps` and rebuild from the new seed. The
+/// terrain mesh rebuild itself happens in `terrain_controls`; this
+/// system keeps the minerals locked to it.
+fn regenerate_on_seed_change(
+    mut commands: Commands,
+    terrain: Res<crate::terrain_controls::TerrainState>,
+    mut last_seed: Local<Option<u64>>,
+) {
+    let current = terrain.seed;
+    if *last_seed == Some(current) {
+        return;
+    }
+    // Skip the first frame after Startup — `generate_initial_maps`
+    // already produced maps for this seed, no need to redo the work.
+    if last_seed.is_none() {
+        *last_seed = Some(current);
+        return;
+    }
+    commands.insert_resource(MineralMaps::generate(
+        current,
+        MAP_SIZE,
+        MAP_RESOLUTION,
+    ));
+    *last_seed = Some(current);
 }
 
 // ----- UI -----------------------------------------------------------------

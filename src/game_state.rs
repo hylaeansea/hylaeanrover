@@ -7,6 +7,9 @@
 //!     `AT_REST_REQUIRED_SECS`. Requiring the rest avoids ending the
 //!     game mid-tumble — a rover that flips over but keeps rolling
 //!     might land back on its wheels.
+//!   - **BeaconsDeployed**: `reward.beacons_remaining == 0`. Fires the
+//!     instant the player drops the final beacon — no at-rest gate
+//!     since the player chose to end the run.
 //!
 //! "At rest" means both linear and angular velocity are below their
 //! thresholds; otherwise the at-rest timer resets to zero each frame.
@@ -19,6 +22,7 @@ use bevy::prelude::*;
 use bevy_rapier3d::prelude::Velocity;
 
 use crate::power_cubes::{PowerState, RelaunchEvent};
+use crate::reward::RewardState;
 use crate::ChassisEntity;
 
 // ---- Tuning constants ---------------------------------------------------
@@ -55,6 +59,7 @@ pub enum GameStatus {
 pub enum GameOverReason {
     OutOfPower,
     Flipped,
+    BeaconsDeployed,
 }
 
 impl GameOverReason {
@@ -63,6 +68,7 @@ impl GameOverReason {
         match self {
             GameOverReason::OutOfPower => "OUT OF POWER",
             GameOverReason::Flipped => "FLIPPED",
+            GameOverReason::BeaconsDeployed => "BEACONS DEPLOYED",
         }
     }
     /// One-line subtitle below the headline.
@@ -70,6 +76,7 @@ impl GameOverReason {
         match self {
             GameOverReason::OutOfPower => "the rover has run dry.",
             GameOverReason::Flipped => "the rover is on its head.",
+            GameOverReason::BeaconsDeployed => "all five beacons placed — survey complete.",
         }
     }
 }
@@ -91,12 +98,21 @@ fn update_game_state(
     chassis_res: Res<ChassisEntity>,
     chassis_q: Query<(&GlobalTransform, Option<&Velocity>)>,
     power: Res<PowerState>,
+    reward: Res<RewardState>,
     time: Res<Time>,
     mut state: ResMut<GameState>,
 ) {
     // Once we've fired a game-over, freeze — the at-rest timer no longer
     // matters and we don't want to silently switch reasons mid-modal.
     if !matches!(state.status, GameStatus::Playing) {
+        return;
+    }
+
+    // Immediate trigger: the player just placed the final beacon. No
+    // at-rest gate — placing a beacon is a deliberate, terminal action,
+    // and waiting 5 s after the click would feel laggy.
+    if reward.beacons_remaining == 0 {
+        state.status = GameStatus::GameOver(GameOverReason::BeaconsDeployed);
         return;
     }
 
