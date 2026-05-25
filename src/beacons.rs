@@ -9,6 +9,9 @@
 use bevy::prelude::*;
 use bevy_rapier3d::prelude::*;
 
+use crate::minerals::MineralMaps;
+use crate::power_cubes::RelaunchEvent;
+use crate::reward::RewardState;
 use crate::terrain_controls::TerrainState;
 use crate::ChassisEntity;
 
@@ -42,7 +45,20 @@ impl Plugin for BeaconsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<BeaconAssets>()
             .add_systems(Startup, load_beacon_asset)
-            .add_systems(Update, place_beacon_on_input);
+            .add_systems(Update, (place_beacon_on_input, despawn_beacons_on_relaunch));
+    }
+}
+
+fn despawn_beacons_on_relaunch(
+    mut commands: Commands,
+    mut events: MessageReader<RelaunchEvent>,
+    beacons_q: Query<Entity, With<Beacon>>,
+) {
+    if events.read().count() == 0 {
+        return;
+    }
+    for entity in beacons_q.iter() {
+        commands.entity(entity).despawn();
     }
 }
 
@@ -57,6 +73,8 @@ fn place_beacon_on_input(
     chassis_q: Query<&GlobalTransform>,
     terrain: Option<Res<TerrainState>>,
     assets: Res<BeaconAssets>,
+    maps: Res<MineralMaps>,
+    mut reward: ResMut<RewardState>,
 ) {
     if !keyboard.just_pressed(KeyCode::KeyB) {
         return;
@@ -88,6 +106,15 @@ fn place_beacon_on_input(
     // of the rover's suspension state.
     if let Some(terrain) = terrain {
         beacon_pos.y = terrain.height_at(beacon_pos.x, beacon_pos.z);
+    }
+
+    // Try to spend a beacon from the budget. If the player has none
+    // left, refuse to place — same effect as the key being dead.
+    if reward
+        .try_credit_beacon(&maps, beacon_pos.x, beacon_pos.z)
+        .is_none()
+    {
+        return;
     }
 
     commands.spawn((

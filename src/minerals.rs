@@ -273,14 +273,34 @@ impl MineralMaps {
             .collect()
     }
 
-    /// Hidden from the HUD; will drive future beacon-scoring.
-    #[allow(dead_code)]
+    /// Hidden from the HUD; drives beacon-placement scoring in
+    /// `reward.rs`.
     pub fn subsurface_at(&self, element: usize, x: f32, z: f32) -> f32 {
         self.subsurface
             .get(element)
             .map(|g| lookup(g, self.resolution, self.size, x, z))
             .unwrap_or(0.0)
     }
+
+    /// (name, subsurface concentration g/m³) for every tracked element
+    /// at world XZ. The subsurface map is the *actual* deposit value the
+    /// player is trying to infer from surface readings — the reward
+    /// system credits beacons placed over high-subsurface spots.
+    pub fn subsurface_all_at(&self, x: f32, z: f32) -> Vec<(&'static str, f32)> {
+        ELEMENTS
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (e.name, self.subsurface_at(i, x, z)))
+            .collect()
+    }
+}
+
+/// Static catalog: yields `(name, base_concentration_g_m3)` in the same
+/// order the sample helpers use. Lets the reward system normalize raw
+/// concentrations against baseline without duplicating the per-element
+/// constants.
+pub fn element_catalog() -> impl Iterator<Item = (&'static str, f32)> + 'static {
+    ELEMENTS.iter().map(|e| (e.name, e.base))
 }
 
 // ----- UI marker components -----------------------------------------------

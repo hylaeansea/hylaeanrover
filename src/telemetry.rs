@@ -14,8 +14,10 @@
 use bevy::prelude::*;
 use serde::Serialize;
 
+use crate::game_state::{GameOverReason, GameState, GameStatus};
 use crate::minerals::MineralMaps;
 use crate::power_cubes::PowerState;
+use crate::reward::{RewardState, BEACON_BUDGET};
 use crate::ui::UiFont;
 use crate::ChassisEntity;
 
@@ -62,6 +64,11 @@ struct Observation<'a> {
     visible_cubes: &'a [CubeTelemetry],
     power: PowerTelemetry,
     minerals_g_m3: Vec<MineralTelemetry>,
+    reward: RewardSnapshot,
+    beacons: BeaconSnapshot,
+    /// `null` while playing, `"out_of_power"` or `"flipped"` once a
+    /// terminal condition has been reached.
+    game_over: Option<&'static str>,
 }
 
 #[derive(Serialize)]
@@ -74,6 +81,20 @@ struct PowerTelemetry {
 struct MineralTelemetry {
     name: &'static str,
     surface: f32,
+}
+
+#[derive(Serialize)]
+struct RewardSnapshot {
+    total: f32,
+    distance: f32,
+    mineral_integral: f32,
+    beacon_bonus: f32,
+}
+
+#[derive(Serialize)]
+struct BeaconSnapshot {
+    remaining: u32,
+    budget: u32,
 }
 
 // ---- Plugin --------------------------------------------------------------
@@ -130,6 +151,8 @@ fn format_telemetry_json(
     telemetry: Res<RoverTelemetry>,
     power: Res<PowerState>,
     minerals: Res<MineralMaps>,
+    reward: Res<RewardState>,
+    game_state: Res<GameState>,
     chassis_res: Res<ChassisEntity>,
     xforms: Query<&GlobalTransform>,
     mut text_q: Query<&mut Text, With<TelemetryText>>,
@@ -152,6 +175,12 @@ fn format_telemetry_json(
         .map(|(name, surface)| MineralTelemetry { name, surface: round_sig(surface, 4) })
         .collect();
 
+    let game_over = match game_state.status {
+        GameStatus::Playing => None,
+        GameStatus::GameOver(GameOverReason::OutOfPower) => Some("out_of_power"),
+        GameStatus::GameOver(GameOverReason::Flipped) => Some("flipped"),
+    };
+
     let observation = Observation {
         ready: telemetry.ready,
         imu: telemetry.imu,
@@ -162,6 +191,17 @@ fn format_telemetry_json(
             max_kwh: round3(power.max / 1000.0),
         },
         minerals_g_m3,
+        reward: RewardSnapshot {
+            total: round2(reward.total()),
+            distance: round2(reward.distance),
+            mineral_integral: round2(reward.mineral_integral),
+            beacon_bonus: round2(reward.beacon_bonus),
+        },
+        beacons: BeaconSnapshot {
+            remaining: reward.beacons_remaining,
+            budget: BEACON_BUDGET,
+        },
+        game_over,
     };
 
     **text = serde_json::to_string(&observation)
