@@ -2,8 +2,13 @@
 //!
 //! Bevy's built-in default font is `FiraMono-subset` — ASCII only. Anything
 //! outside that range (°, ×, ±, μ, ², arrows…) renders as a blank tofu box.
-//! We load the full Fira Sans family from `assets/fonts/` at startup and
-//! expose it as a `UiFont` resource so every panel can pull the same handle.
+//! We load DejaVu Sans from `assets/fonts/` at startup and expose it as a
+//! `UiFont` resource so every panel can pull the same handle.
+//!
+//! DejaVu Sans (vs. Fira Sans we used previously) covers the Geometric
+//! Shapes (●○) and Block Elements (▁▂▃▄▅▆▇█) ranges that the wheel-contact
+//! glyphs and the lidar histogram rely on. Bitstream Vera derivative
+//! license — see `assets/fonts/LICENSE.txt`.
 
 use bevy::prelude::*;
 
@@ -32,6 +37,6 @@ impl Plugin for UiFontPlugin {
 // queries the resource.
 fn load_ui_fonts(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands.insert_resource(UiFont {
-        regular: asset_server.load("fonts/FiraSans-Regular.ttf"),
+        regular: asset_server.load("fonts/DejaVuSans.ttf"),
     });
 }

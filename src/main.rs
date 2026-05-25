@@ -229,6 +229,12 @@ fn attach_colliders(
             }
             "wheel_fl" | "wheel_fr" | "wheel_bl" | "wheel_br" => {
                 let wheel_rotation = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
+                let pos = match name.as_str() {
+                    "wheel_fl" => WheelPosition::FrontLeft,
+                    "wheel_fr" => WheelPosition::FrontRight,
+                    "wheel_bl" => WheelPosition::BackLeft,
+                    _ /* wheel_br */ => WheelPosition::BackRight,
+                };
                 commands.entity(entity).insert((
                     RigidBody::Dynamic,
                     Collider::compound(vec![(
@@ -242,8 +248,11 @@ fn attach_colliders(
                     // driving through compacted sand, not skating on ice.
                     Friction::coefficient(2.5),
                     Sleeping::disabled(),
+                    // Sensor systems read wheel ω + linvel to compute slip.
+                    Velocity::default(),
                     rover_groups,
                     Wheel,
+                    pos,
                 ));
             }
             _ => {}
@@ -425,6 +434,16 @@ fn attach_joints(
 /// Marker on the wheel entities so the drive system can target the spin motor.
 #[derive(Component)]
 struct Wheel;
+
+/// Per-wheel position, attached alongside `Wheel` in `attach_colliders`.
+/// `pub` so sensor modules can identify which corner a wheel is at.
+#[derive(Component, Clone, Copy, PartialEq, Eq)]
+pub enum WheelPosition {
+    FrontLeft,
+    FrontRight,
+    BackLeft,
+    BackRight,
+}
 
 /// Marker + per-wheel orientation flag on the knuckle entities. `is_front`
 /// determines the sign of the steering target (front and rear are
