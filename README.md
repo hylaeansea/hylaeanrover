@@ -13,7 +13,7 @@ The repo contains:
   (`crates/hylaeanrover_py/` + `python/hylaeanrover/`)
 - the **shared game logic** both use (`crates/hylaeanrover_core/`)
 
-![Rover sitting on the landing pad at game start, with the full HUD visible.](https://hylaeansea.org/assets/images/hylaeanrover_screenshot_begingame.png)
+![Rover sitting on the landing pad at game start, with the full HUD visible.](https://hylaeansea.org/assets/images/hylaeanrover_screenshot_begingame_readme.png)
 
 The HUD shows everything the simulation is tracking. Left column:
 **POWER** reserve in kWh, **MINERAL SURVEY** with surface
@@ -44,7 +44,7 @@ A run ends when one of three conditions hits:
 - you tip the rover over and it comes to rest (failure)
 - you run out of power and come to rest (failure)
 
-![Game-over screen showing "BEACONS DEPLOYED — all five beacons placed — survey complete." with three orange-tipped beacons visible behind the rover.](https://hylaeansea.org/assets/images/hylaeanrover_screenshot_endgame.png)
+![Game-over screen showing "BEACONS DEPLOYED — all five beacons placed — survey complete." with three orange-tipped beacons visible behind the rover.](https://hylaeansea.org/assets/images/hylaeanrover_screenshot_endgame_readme.png)
 
 ## The mineral overlay system
 
@@ -52,9 +52,9 @@ Clicking a row in the **MINERAL SURVEY** panel colour-codes the
 terrain by that element's surface concentration. Drives the
 intuition for where to spend beacons:
 
-![Iron overlay — terrain shaded in browns and oranges.](https://hylaeansea.org/assets/images/hylaeanrover_screenshot_fe.png)
-![Titanium overlay — magenta hotspots are ilmenite-rich pockets.](https://hylaeansea.org/assets/images/hylaeanrover_screenshot_ti.png)
-![Water overlay — cyan patches mark permanently-shadowed reservoirs.](https://hylaeansea.org/assets/images/hylaeanrover_screenshot_h2o.png)
+![Iron overlay — terrain shaded in browns and oranges.](https://hylaeansea.org/assets/images/hylaeanrover_screenshot_fe_readme.png)
+![Titanium overlay — magenta hotspots are ilmenite-rich pockets.](https://hylaeansea.org/assets/images/hylaeanrover_screenshot_ti_readme.png)
+![Water overlay — cyan patches mark permanently-shadowed reservoirs.](https://hylaeansea.org/assets/images/hylaeanrover_screenshot_h2o_readme.png)
 
 The trick is that the *surface* readings the HUD shows are only
 loosely correlated with the *subsurface* deposits beacons actually
