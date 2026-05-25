@@ -9,17 +9,21 @@ use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin};
 use bevy_rapier3d::prelude::*;
 
 mod beacons;
+mod game_state;
 mod imu;
 mod minerals;
 mod power_cubes;
+mod reward;
 mod telemetry;
 mod terrain;
 mod terrain_controls;
 mod ui;
 use beacons::BeaconsPlugin;
+use game_state::GameStatePlugin;
 use imu::ImuPlugin;
 use minerals::MineralsPlugin;
 use power_cubes::PowerCubesPlugin;
+use reward::RewardPlugin;
 use telemetry::TelemetryPlugin;
 use ui::{UiFont, UiFontPlugin};
 use terrain_controls::{cursor_over_terrain_panel, TerrainControlsPlugin, TerrainPanel};
@@ -56,6 +60,14 @@ fn main() {
         // Left-side HUD with speed / heading / pitch / roll — IMU-like
         // telemetry for RL observation features.
         .add_plugins(ImuPlugin)
+        // Reward function for the RL agent: distance + scarcity-weighted
+        // mineral integral + beacon-bonus. Owns the top-bar UI showing
+        // beacons-remaining and the running total.
+        .add_plugins(RewardPlugin)
+        // Watches power + chassis attitude/velocity and decides when to
+        // flip the game into a GameOver state (which the modal in
+        // power_cubes.rs then renders).
+        .add_plugins(GameStatePlugin)
         // Bottom-of-screen JSON observation readout — same shape an RL
         // agent would receive over the wire. Reads RoverTelemetry +
         // PowerState + MineralMaps.

@@ -14,6 +14,7 @@ use bevy::prelude::*;
 use bevy::ui::RelativeCursorPosition;
 use bevy_rapier3d::prelude::*;
 
+use crate::game_state::{GameState, GameStatus};
 use crate::ui::{LeftSidebar, LeftSidebarSet, UiFont};
 use rand::Rng;
 
@@ -85,6 +86,16 @@ struct TutorialBanner;
 
 #[derive(Component)]
 struct GameOverPanel;
+
+/// Text node showing the game-over headline (e.g. "OUT OF POWER").
+/// Marked so `update_game_over_visibility` can swap its content per
+/// `GameOverReason`.
+#[derive(Component)]
+struct GameOverHeadlineText;
+
+/// Text node showing the one-line subtitle below the headline.
+#[derive(Component)]
+struct GameOverSubtitleText;
 
 #[derive(Component)]
 struct RelaunchButton;
@@ -372,7 +383,13 @@ fn consume_power_from_motion(
             let delta_wh = dist * DRAIN_PER_METER;
             if throttling {
                 power.current = (power.current - delta_wh).max(0.0);
-            } else {
+            } else if power.has_power() {
+                // Regen only works if the battery isn't already empty —
+                // a dead battery stays dead until a cube is picked up.
+                // Without this gate, coasting at 0 power generates a
+                // sliver of regen → throttle works for one frame → drain
+                // → 0 → coast → loop. The rover never actually comes to
+                // rest, so the at-rest game-over trigger never fires.
                 power.current =
                     (power.current + delta_wh * REGEN_EFFICIENCY).min(power.max);
             }
@@ -727,11 +744,13 @@ fn setup_game_over_ui(mut commands: Commands, ui_font: Res<UiFont>) {
                     Text::new("OUT OF POWER"),
                     ui_font.text(32.0),
                     TextColor(TEXT_ACCENT),
+                    GameOverHeadlineText,
                 ));
                 card.spawn((
                     Text::new("the rover has run dry."),
                     ui_font.text(14.0),
                     TextColor(TEXT_MAIN),
+                    GameOverSubtitleText,
                 ));
                 card.spawn((
                     Text::new("game over"),
@@ -765,19 +784,40 @@ fn setup_game_over_ui(mut commands: Commands, ui_font: Res<UiFont>) {
 }
 
 fn update_game_over_visibility(
-    power: Res<PowerState>,
+    state: Res<GameState>,
     mut panel_q: Query<&mut Node, With<GameOverPanel>>,
     mut button_bg_q: Query<&mut BackgroundColor, With<RelaunchButton>>,
     button_int_q: Query<&Interaction, With<RelaunchButton>>,
+    mut headline_q: Query<
+        &mut Text,
+        (With<GameOverHeadlineText>, Without<GameOverSubtitleText>),
+    >,
+    mut subtitle_q: Query<
+        &mut Text,
+        (With<GameOverSubtitleText>, Without<GameOverHeadlineText>),
+    >,
 ) {
     let Ok(mut node) = panel_q.single_mut() else { return };
-    let target = if power.current <= 0.0 {
-        Display::Flex
-    } else {
-        Display::None
+    let reason = match state.status {
+        GameStatus::Playing => None,
+        GameStatus::GameOver(r) => Some(r),
     };
+    let target = if reason.is_some() { Display::Flex } else { Display::None };
     if node.display != target {
         node.display = target;
+    }
+
+    // Swap the headline / subtitle copy to match the reason. Defaults
+    // (the original "OUT OF POWER" text in the modal) are fine for the
+    // never-shown Playing state, so we only touch the texts when the
+    // game-over panel is actually visible.
+    if let Some(r) = reason {
+        if let Ok(mut text) = headline_q.single_mut() {
+            **text = r.headline().to_string();
+        }
+        if let Ok(mut text) = subtitle_q.single_mut() {
+            **text = r.subtitle().to_string();
+        }
     }
 
     // Hover tint on the button.
