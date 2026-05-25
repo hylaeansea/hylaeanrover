@@ -27,8 +27,6 @@ pub struct RoverTelemetry {
     /// has populated the data.
     pub ready: bool,
     pub imu: ImuTelemetry,
-    /// Fixed order: FL, FR, BL, BR.
-    pub wheels: [WheelTelemetry; 4],
     /// 8 ray distances in meters, indexed left → right across the fan.
     /// 200.0 = sensor max range (no hit).
     pub lidar_m: [f32; 8],
@@ -48,13 +46,6 @@ pub struct ImuTelemetry {
     pub accel_lat_m_s2: f32,
 }
 
-#[derive(Serialize, Default, Clone, Copy)]
-pub struct WheelTelemetry {
-    pub label: &'static str,
-    pub contact: bool,
-    pub slip: f32,
-}
-
 #[derive(Serialize, Clone, Copy)]
 pub struct CubeTelemetry {
     pub bearing_deg: f32,
@@ -67,7 +58,6 @@ pub struct CubeTelemetry {
 struct Observation<'a> {
     ready: bool,
     imu: ImuTelemetry,
-    wheels: &'a [WheelTelemetry],
     lidar_m: &'a [f32],
     visible_cubes: &'a [CubeTelemetry],
     power: PowerTelemetry,
@@ -154,16 +144,17 @@ fn format_telemetry_json(
         .and_then(|e| xforms.get(e).ok())
         .map(|gxf| (gxf.translation().x, gxf.translation().z))
         .unwrap_or((0.0, 0.0));
+    // 4 significant figures handles both Si (~300 000) and He-3 (~0.003)
+    // without ever rounding the trace elements to 0.0.
     let minerals_g_m3 = minerals
         .surface_all_at(x, z)
         .into_iter()
-        .map(|(name, surface)| MineralTelemetry { name, surface: round1(surface) })
+        .map(|(name, surface)| MineralTelemetry { name, surface: round_sig(surface, 4) })
         .collect();
 
     let observation = Observation {
         ready: telemetry.ready,
         imu: telemetry.imu,
-        wheels: &telemetry.wheels,
         lidar_m: &telemetry.lidar_m,
         visible_cubes: &telemetry.visible_cubes,
         power: PowerTelemetry {
@@ -185,3 +176,16 @@ fn format_telemetry_json(
 pub fn round1(v: f32) -> f32 { (v * 10.0).round() / 10.0 }
 pub fn round2(v: f32) -> f32 { (v * 100.0).round() / 100.0 }
 pub fn round3(v: f32) -> f32 { (v * 1000.0).round() / 1000.0 }
+
+/// Round to `sig` significant figures. Used for mineral concentrations
+/// because they span ~9 orders of magnitude — He-3 is ≈0.003 g/m³ while
+/// Si is ≈300 000 g/m³, and a fixed decimal-place round (e.g. round1)
+/// floors He-3 to 0.0 forever.
+fn round_sig(v: f32, sig: i32) -> f32 {
+    if v == 0.0 || !v.is_finite() {
+        return v;
+    }
+    let exp = v.abs().log10().floor() as i32;
+    let factor = 10f32.powi(sig - 1 - exp);
+    (v * factor).round() / factor
+}

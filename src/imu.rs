@@ -1,6 +1,6 @@
 //! Left-side sensor stack for RL instrumentation.
 //!
-//! All readouts share one big panel ("IMU / TELEMETRY") with three
+//! All readouts share one big panel ("IMU / TELEMETRY") with two
 //! subsections, plus a separate cubes panel below it.
 //!
 //! Motion (per-frame, from chassis GlobalTransform + Velocity):
@@ -11,11 +11,6 @@
 //!   - yaw rate  : world-Y component of chassis angvel, deg/s
 //!   - accel fwd : EMA-smoothed longitudinal accel (body frame), m/s²
 //!   - accel lat : EMA-smoothed lateral accel (body frame), m/s²
-//!
-//! Wheels (per-frame, per wheel):
-//!   - contact   : down-raycast hits within wheel_radius + ε
-//!   - slip      : (v_rolling − v_chassis_along_fwd) / max(|·|, ε)
-//!                 +1 = wheel spinning in air; -1 = locked + sliding
 //!
 //! Lidar:
 //!   - 8 horizontal rays, fanned ±90° around chassis-forward, capped at
@@ -32,9 +27,9 @@ use bevy::prelude::*;
 use bevy_rapier3d::prelude::*;
 
 use crate::power_cubes::PowerCube;
-use crate::telemetry::{round1, round2, CubeTelemetry, ImuTelemetry, RoverTelemetry, WheelTelemetry};
-use crate::ui::UiFont;
-use crate::{ChassisEntity, ROVER_GROUP, WheelPosition};
+use crate::telemetry::{round1, round2, CubeTelemetry, ImuTelemetry, RoverTelemetry};
+use crate::ui::{LeftSidebar, LeftSidebarSet, UiFont};
+use crate::{ChassisEntity, ROVER_GROUP};
 
 // Re-use the same neon-on-dark styling the other left-side panels use so
 // this slots in visually without a fresh palette.
@@ -57,10 +52,6 @@ enum ImuReadout {
     AccelLat,
 }
 
-/// Wheel-row Text marker; one per corner.
-#[derive(Component)]
-struct WheelReadoutText(WheelPosition);
-
 /// The single Text node showing the lidar histogram.
 #[derive(Component)]
 struct LidarText;
@@ -74,17 +65,6 @@ struct CubeRowAngle(usize);
 struct CubeRowDist(usize);
 
 // ---- Sensor parameters ---------------------------------------------------
-
-/// Wheel radius — second arg to `Collider::cylinder` at main.rs (the
-/// wheel half-height comes first). Used to size the contact ray and
-/// convert wheel ω to rolling speed.
-const WHEEL_RADIUS: f32 = 1.12;
-/// Extra margin on the contact ray to absorb suspension compression.
-const CONTACT_EPS: f32 = 0.05;
-/// Angles (deg) for the contact-detection ray fan, measured from straight
-/// world-down and rotated about the wheel's spin axis. Covers ±30° of
-/// slope tilt — comfortably more than the rover can actually climb.
-const CONTACT_RAY_ANGLES_DEG: [f32; 3] = [-30.0, 0.0, 30.0];
 
 const LIDAR_RAYS: usize = 8;
 const LIDAR_MAX_RANGE: f32 = 200.0;
@@ -105,15 +85,11 @@ pub struct ImuPlugin;
 
 impl Plugin for ImuPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, (setup_imu_ui, setup_cube_sensor_ui))
+        app.add_systems(Startup, setup_imu_ui.in_set(LeftSidebarSet::Imu))
+            .add_systems(Startup, setup_cube_sensor_ui.in_set(LeftSidebarSet::Cubes))
             .add_systems(
                 Update,
-                (
-                    sync_imu_motion,
-                    sync_wheel_ui,
-                    sync_lidar_ui,
-                    sync_cube_sensor_ui,
-                ),
+                (sync_imu_motion, sync_lidar_ui, sync_cube_sensor_ui),
             );
     }
 }
@@ -128,16 +104,11 @@ fn rover_excluded_filter() -> QueryFilter<'static> {
 
 // ===== IMU panel setup ====================================================
 
-fn setup_imu_ui(mut commands: Commands, ui_font: Res<UiFont>) {
+fn setup_imu_ui(mut commands: Commands, ui_font: Res<UiFont>, sidebar: Res<LeftSidebar>) {
     commands
         .spawn((
             Node {
-                position_type: PositionType::Absolute,
-                // Sit directly under the MINERAL SURVEY panel
-                // (POWER 0..110, MINERAL ~110..360).
-                top: Val::Px(360.0),
-                left: Val::Px(0.0),
-                width: Val::Px(240.0),
+                width: Val::Percent(100.0),
                 padding: UiRect::all(Val::Px(14.0)),
                 flex_direction: FlexDirection::Column,
                 row_gap: Val::Px(4.0),
@@ -145,6 +116,7 @@ fn setup_imu_ui(mut commands: Commands, ui_font: Res<UiFont>) {
             },
             BackgroundColor(PANEL_BG),
             Outline::new(Val::Px(1.0), Val::Px(0.0), PANEL_EDGE),
+            ChildOf(sidebar.0),
         ))
         .with_children(|panel| {
             // --- Header ---
@@ -163,11 +135,6 @@ fn setup_imu_ui(mut commands: Commands, ui_font: Res<UiFont>) {
             row(panel, &ui_font, "yaw rate",  ImuReadout::YawRate);
             row(panel, &ui_font, "accel fwd", ImuReadout::AccelFwd);
             row(panel, &ui_font, "accel lat", ImuReadout::AccelLat);
-
-            // --- Wheels subsection ---
-            subheader(panel, &ui_font, "WHEELS");
-            wheel_row(panel, &ui_font, WheelPosition::FrontLeft,  WheelPosition::FrontRight);
-            wheel_row(panel, &ui_font, WheelPosition::BackLeft,   WheelPosition::BackRight);
 
             // --- Lidar subsection ---
             subheader(panel, &ui_font, "LIDAR (±90°, 8 rays)");
@@ -233,35 +200,6 @@ fn row(panel: &mut ChildSpawnerCommands, ui_font: &UiFont, label: &str, kind: Im
                 ui_font.text(12.0),
                 TextColor(TEXT_ACCENT),
                 kind,
-            ));
-        });
-}
-
-fn wheel_row(
-    panel: &mut ChildSpawnerCommands,
-    ui_font: &UiFont,
-    left: WheelPosition,
-    right: WheelPosition,
-) {
-    panel
-        .spawn(Node {
-            flex_direction: FlexDirection::Row,
-            justify_content: JustifyContent::SpaceBetween,
-            padding: UiRect::axes(Val::Px(4.0), Val::Px(2.0)),
-            ..default()
-        })
-        .with_children(|r| {
-            r.spawn((
-                Text::new("--"),
-                ui_font.text(12.0),
-                TextColor(TEXT_ACCENT),
-                WheelReadoutText(left),
-            ));
-            r.spawn((
-                Text::new("--"),
-                ui_font.text(12.0),
-                TextColor(TEXT_ACCENT),
-                WheelReadoutText(right),
             ));
         });
 }
@@ -362,98 +300,6 @@ fn sync_imu_motion(
     telemetry.ready = true;
 }
 
-// ===== Wheel sync =========================================================
-
-fn sync_wheel_ui(
-    wheels: Query<(&GlobalTransform, &Velocity, &WheelPosition)>,
-    rapier: ReadRapierContext,
-    mut texts: Query<(&WheelReadoutText, &mut Text)>,
-    mut telemetry: ResMut<RoverTelemetry>,
-) {
-    let Ok(ctx) = rapier.single() else { return };
-    let filter = rover_excluded_filter();
-
-    // Compute (contact, slip) per wheel, indexed by position.
-    let mut readings: [Option<(bool, f32)>; 4] = [None; 4];
-
-    for (gxf, vel, &pos) in wheels.iter() {
-        let center = gxf.translation();
-
-        // Contact: cast 3 rays from the wheel center in the wheel's
-        // rolling plane (rotated about the spin axis). A single
-        // straight-down ray misses the actual contact patch on slopes
-        // steeper than ~17°, because on an incline the wheel touches
-        // the ground at an offset point on its circumference, not the
-        // straight-down point. Three rays cover ±30° of tilt — enough
-        // for any slope the rover can actually climb — without the
-        // false-positives a longer single ray would introduce.
-        let spin_axis = gxf.rotation() * Vec3::Z;
-        let in_contact = CONTACT_RAY_ANGLES_DEG.iter().any(|&a| {
-            let dir = Quat::from_axis_angle(spin_axis, a.to_radians()) * Vec3::NEG_Y;
-            ctx.cast_ray(center, dir, WHEEL_RADIUS + CONTACT_EPS, true, filter)
-                .is_some()
-        });
-
-        // Slip ratio: compare the ground-track speed the wheel *would*
-        // generate by rolling (ω·r) to the actual chassis-forward speed
-        // at the wheel center. Spin axis is the wheel's local Z, which
-        // includes steering rotation since the wheel is jointed to the
-        // knuckle (which carries the steering angle).
-        let spin_axis = gxf.rotation() * Vec3::Z;
-        let fwd_dir = spin_axis.cross(Vec3::Y).normalize_or_zero();
-        let omega = vel.angvel.dot(spin_axis);
-        let v_rolling = omega * WHEEL_RADIUS;
-        let v_chassis = vel.linvel.dot(fwd_dir);
-        let denom = v_rolling.abs().max(v_chassis.abs()).max(0.1);
-        let slip = (v_rolling - v_chassis) / denom;
-
-        readings[wheel_index(pos)] = Some((in_contact, slip));
-    }
-
-    for (marker, mut text) in texts.iter_mut() {
-        let label = wheel_label(marker.0);
-        **text = match readings[wheel_index(marker.0)] {
-            Some((true, slip))  => format!("{} ● {:>+5.2}", label, slip),
-            Some((false, _))    => format!("{} ○    --", label),
-            None                => format!("{}   --", label),
-        };
-    }
-
-    // Mirror into telemetry; airborne wheels report slip = 0.
-    for pos in [
-        WheelPosition::FrontLeft,
-        WheelPosition::FrontRight,
-        WheelPosition::BackLeft,
-        WheelPosition::BackRight,
-    ] {
-        let idx = wheel_index(pos);
-        let (contact, slip) = readings[idx].unwrap_or((false, 0.0));
-        telemetry.wheels[idx] = WheelTelemetry {
-            label: wheel_label(pos),
-            contact,
-            slip: round2(if contact { slip } else { 0.0 }),
-        };
-    }
-}
-
-fn wheel_index(pos: WheelPosition) -> usize {
-    match pos {
-        WheelPosition::FrontLeft => 0,
-        WheelPosition::FrontRight => 1,
-        WheelPosition::BackLeft => 2,
-        WheelPosition::BackRight => 3,
-    }
-}
-
-fn wheel_label(pos: WheelPosition) -> &'static str {
-    match pos {
-        WheelPosition::FrontLeft => "FL",
-        WheelPosition::FrontRight => "FR",
-        WheelPosition::BackLeft => "BL",
-        WheelPosition::BackRight => "BR",
-    }
-}
-
 // ===== Lidar sync =========================================================
 
 fn sync_lidar_ui(
@@ -517,17 +363,11 @@ fn distance_bucket(d: f32) -> char {
 
 // ===== Cube sensor panel ==================================================
 
-fn setup_cube_sensor_ui(mut commands: Commands, ui_font: Res<UiFont>) {
+fn setup_cube_sensor_ui(mut commands: Commands, ui_font: Res<UiFont>, sidebar: Res<LeftSidebar>) {
     commands
         .spawn((
             Node {
-                position_type: PositionType::Absolute,
-                // Below the IMU panel — which is ≈340 px tall now that
-                // it stacks motion + wheels + lidar subsections, so this
-                // sits at 360 (IMU top) + 340 (IMU height) + ~30 (gap).
-                top: Val::Px(730.0),
-                left: Val::Px(0.0),
-                width: Val::Px(240.0),
+                width: Val::Percent(100.0),
                 padding: UiRect::all(Val::Px(14.0)),
                 flex_direction: FlexDirection::Column,
                 row_gap: Val::Px(6.0),
@@ -535,6 +375,7 @@ fn setup_cube_sensor_ui(mut commands: Commands, ui_font: Res<UiFont>) {
             },
             BackgroundColor(PANEL_BG),
             Outline::new(Val::Px(1.0), Val::Px(0.0), PANEL_EDGE),
+            ChildOf(sidebar.0),
         ))
         .with_children(|panel| {
             panel.spawn((

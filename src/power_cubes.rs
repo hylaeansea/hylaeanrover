@@ -14,7 +14,7 @@ use bevy::prelude::*;
 use bevy::ui::RelativeCursorPosition;
 use bevy_rapier3d::prelude::*;
 
-use crate::ui::UiFont;
+use crate::ui::{LeftSidebar, LeftSidebarSet, UiFont};
 use rand::Rng;
 
 use crate::terrain_controls::TerrainState;
@@ -178,12 +178,14 @@ impl Plugin for PowerCubesPlugin {
                 Startup,
                 (
                     setup_assets,
-                    setup_power_ui,
                     setup_tutorial_ui,
                     setup_game_over_ui,
                     setup_controls_hint,
                 ),
             )
+            // POWER panel runs in the LeftSidebarSet::Power slot so it
+            // ends up first in the sidebar's child list.
+            .add_systems(Startup, setup_power_ui.in_set(LeftSidebarSet::Power))
             .add_systems(
                 Update,
                 (
@@ -214,14 +216,11 @@ fn setup_assets(
     ));
 }
 
-fn setup_power_ui(mut commands: Commands, ui_font: Res<UiFont>) {
+fn setup_power_ui(mut commands: Commands, ui_font: Res<UiFont>, sidebar: Res<LeftSidebar>) {
     commands
         .spawn((
             Node {
-                position_type: PositionType::Absolute,
-                top: Val::Px(0.0),
-                left: Val::Px(0.0),
-                width: Val::Px(240.0),
+                width: Val::Percent(100.0),
                 padding: UiRect::all(Val::Px(14.0)),
                 flex_direction: FlexDirection::Column,
                 row_gap: Val::Px(8.0),
@@ -231,6 +230,7 @@ fn setup_power_ui(mut commands: Commands, ui_font: Res<UiFont>) {
             Outline::new(Val::Px(1.0), Val::Px(0.0), PANEL_EDGE),
             RelativeCursorPosition::default(),
             PowerPanel,
+            ChildOf(sidebar.0),
         ))
         .with_children(|panel| {
             panel.spawn((

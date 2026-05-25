@@ -19,7 +19,7 @@
 use bevy::prelude::*;
 use rand::{rngs::StdRng, Rng, SeedableRng};
 
-use crate::ui::UiFont;
+use crate::ui::{LeftSidebar, LeftSidebarSet, UiFont};
 use crate::ChassisEntity;
 
 // ----- Element catalogue --------------------------------------------------
@@ -302,7 +302,7 @@ impl Plugin for MineralsPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(MineralMaps::generate(MAP_SEED, MAP_SIZE, MAP_RESOLUTION))
             .init_resource::<MineralOverlay>()
-            .add_systems(Startup, setup_mineral_ui)
+            .add_systems(Startup, setup_mineral_ui.in_set(LeftSidebarSet::Mineral))
             .add_systems(
                 Update,
                 (
@@ -317,15 +317,11 @@ impl Plugin for MineralsPlugin {
 
 // ----- UI -----------------------------------------------------------------
 
-fn setup_mineral_ui(mut commands: Commands, ui_font: Res<UiFont>) {
+fn setup_mineral_ui(mut commands: Commands, ui_font: Res<UiFont>, sidebar: Res<LeftSidebar>) {
     commands
         .spawn((
             Node {
-                position_type: PositionType::Absolute,
-                // Sit directly under the POWER panel.
-                top: Val::Px(110.0),
-                left: Val::Px(0.0),
-                width: Val::Px(240.0),
+                width: Val::Percent(100.0),
                 padding: UiRect::all(Val::Px(14.0)),
                 flex_direction: FlexDirection::Column,
                 row_gap: Val::Px(6.0),
@@ -333,6 +329,7 @@ fn setup_mineral_ui(mut commands: Commands, ui_font: Res<UiFont>) {
             },
             BackgroundColor(PANEL_BG),
             Outline::new(Val::Px(1.0), Val::Px(0.0), PANEL_EDGE),
+            ChildOf(sidebar.0),
         ))
         .with_children(|panel| {
             panel.spawn((
