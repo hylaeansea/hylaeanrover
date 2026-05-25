@@ -9,13 +9,19 @@ use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin};
 use bevy_rapier3d::prelude::*;
 
 mod beacons;
+mod imu;
 mod minerals;
 mod power_cubes;
+mod telemetry;
 mod terrain;
 mod terrain_controls;
+mod ui;
 use beacons::BeaconsPlugin;
+use imu::ImuPlugin;
 use minerals::MineralsPlugin;
 use power_cubes::PowerCubesPlugin;
+use telemetry::TelemetryPlugin;
+use ui::{UiFont, UiFontPlugin};
 use terrain_controls::{cursor_over_terrain_panel, TerrainControlsPlugin, TerrainPanel};
 
 fn main() {
@@ -23,6 +29,9 @@ fn main() {
         // DefaultPlugins gives us a window, renderer, input, asset loading —
         // everything needed to actually see something on screen
         .add_plugins(DefaultPlugins)
+        // Loads bundled Fira Sans into a `UiFont` resource — every panel
+        // pulls its TextFont from here so non-ASCII glyphs render.
+        .add_plugins(UiFontPlugin)
         // PanOrbitCameraPlugin adds systems that handle mouse input
         // and update any camera entity that has the PanOrbitCamera component
         .add_plugins(PanOrbitCameraPlugin)
@@ -44,6 +53,13 @@ fn main() {
         .add_plugins(BeaconsPlugin)
         // Surface + subsurface mineral maps, drive-by sampler, HUD readout.
         .add_plugins(MineralsPlugin)
+        // Left-side HUD with speed / heading / pitch / roll — IMU-like
+        // telemetry for RL observation features.
+        .add_plugins(ImuPlugin)
+        // Bottom-of-screen JSON observation readout — same shape an RL
+        // agent would receive over the wire. Reads RoverTelemetry +
+        // PowerState + MineralMaps.
+        .add_plugins(TelemetryPlugin)
         // Initialize the chassis resource as empty — attach_physics will fill it
         .init_resource::<ChassisEntity>()
         .init_resource::<CameraMode>()
@@ -209,6 +225,10 @@ fn attach_colliders(
                     // until something jolts it awake — which makes W/A/S/D
                     // appear dead when the rover is fully at rest. Disable.
                     Sleeping::disabled(),
+                    // Rapier only writes linvel/angvel back to entities
+                    // that explicitly carry a Velocity component. The
+                    // steering-taper code and the IMU readout both read it.
+                    Velocity::default(),
                     rover_groups,
                 ));
                 chassis_res.0 = Some(entity);
@@ -239,7 +259,8 @@ fn attach_colliders(
 
 /// Collision group used by every rover collider; its filter is set to
 /// everything *except* this group so the rover never contacts itself.
-const ROVER_GROUP: Group = Group::GROUP_1;
+/// `pub` so sensor modules can build queries that exclude the rover.
+pub const ROVER_GROUP: Group = Group::GROUP_1;
 
 /// Reads keyboard input and drives the rover.
 /// W/S = throttle (spin all wheels forward/reverse).
@@ -502,10 +523,10 @@ fn respawn_rover(
 #[derive(Component)]
 struct FpsText;
 
-fn setup_fps_text(mut commands: Commands) {
+fn setup_fps_text(mut commands: Commands, ui_font: Res<UiFont>) {
     commands.spawn((
         Text::new("FPS: --"),
-        TextFont { font_size: 18.0, ..default() },
+        ui_font.text(18.0),
         TextColor(Color::srgb(1.0, 1.0, 0.4)),
         Node {
             position_type: PositionType::Absolute,

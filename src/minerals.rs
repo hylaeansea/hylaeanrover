@@ -19,6 +19,7 @@
 use bevy::prelude::*;
 use rand::{rngs::StdRng, Rng, SeedableRng};
 
+use crate::ui::{LeftSidebar, LeftSidebarSet, UiFont};
 use crate::ChassisEntity;
 
 // ----- Element catalogue --------------------------------------------------
@@ -262,6 +263,16 @@ impl MineralMaps {
             .unwrap_or(0.0)
     }
 
+    /// (name, surface concentration g/m³) for every tracked element at
+    /// the given world XZ position. For the telemetry JSON readout.
+    pub fn surface_all_at(&self, x: f32, z: f32) -> Vec<(&'static str, f32)> {
+        ELEMENTS
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (e.name, self.surface_at(i, x, z)))
+            .collect()
+    }
+
     /// Hidden from the HUD; will drive future beacon-scoring.
     #[allow(dead_code)]
     pub fn subsurface_at(&self, element: usize, x: f32, z: f32) -> f32 {
@@ -291,7 +302,7 @@ impl Plugin for MineralsPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(MineralMaps::generate(MAP_SEED, MAP_SIZE, MAP_RESOLUTION))
             .init_resource::<MineralOverlay>()
-            .add_systems(Startup, setup_mineral_ui)
+            .add_systems(Startup, setup_mineral_ui.in_set(LeftSidebarSet::Mineral))
             .add_systems(
                 Update,
                 (
@@ -306,15 +317,11 @@ impl Plugin for MineralsPlugin {
 
 // ----- UI -----------------------------------------------------------------
 
-fn setup_mineral_ui(mut commands: Commands) {
+fn setup_mineral_ui(mut commands: Commands, ui_font: Res<UiFont>, sidebar: Res<LeftSidebar>) {
     commands
         .spawn((
             Node {
-                position_type: PositionType::Absolute,
-                // Sit directly under the POWER panel.
-                top: Val::Px(110.0),
-                left: Val::Px(0.0),
-                width: Val::Px(240.0),
+                width: Val::Percent(100.0),
                 padding: UiRect::all(Val::Px(14.0)),
                 flex_direction: FlexDirection::Column,
                 row_gap: Val::Px(6.0),
@@ -322,11 +329,12 @@ fn setup_mineral_ui(mut commands: Commands) {
             },
             BackgroundColor(PANEL_BG),
             Outline::new(Val::Px(1.0), Val::Px(0.0), PANEL_EDGE),
+            ChildOf(sidebar.0),
         ))
         .with_children(|panel| {
             panel.spawn((
                 Text::new("MINERAL SURVEY"),
-                TextFont { font_size: 16.0, ..default() },
+                ui_font.text(16.0),
                 TextColor(TEXT_ACCENT),
             ));
             panel.spawn((
@@ -357,12 +365,12 @@ fn setup_mineral_ui(mut commands: Commands) {
                     .with_children(|row| {
                         row.spawn((
                             Text::new(e.name),
-                            TextFont { font_size: 12.0, ..default() },
+                            ui_font.text(12.0),
                             TextColor(TEXT_MAIN),
                         ));
                         row.spawn((
                             Text::new("-- g/m³"),
-                            TextFont { font_size: 12.0, ..default() },
+                            ui_font.text(12.0),
                             TextColor(TEXT_ACCENT),
                             ElementReadText(i),
                         ));
@@ -372,7 +380,7 @@ fn setup_mineral_ui(mut commands: Commands) {
             // Small hint below the rows.
             panel.spawn((
                 Text::new("click a row to colour-code the terrain"),
-                TextFont { font_size: 10.0, ..default() },
+                ui_font.text(10.0),
                 TextColor(Color::srgba(0.55, 0.65, 0.75, 0.9)),
             ));
         });

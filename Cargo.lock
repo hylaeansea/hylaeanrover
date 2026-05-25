@@ -3005,6 +3005,8 @@ dependencies = [
  "bevy_panorbit_camera",
  "bevy_rapier3d",
  "rand 0.8.6",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
