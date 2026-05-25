@@ -1,0 +1,14 @@
+[package]
+name = "hylaeanrover_game"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "hylaeanrover"
+path = "src/main.rs"
+
+[dependencies]
+hylaeanrover_core = { path = "../hylaeanrover_core" }
+bevy = { workspace = true }
+bevy_rapier3d = { workspace = true }
+bevy_panorbit_camera = { workspace = true }

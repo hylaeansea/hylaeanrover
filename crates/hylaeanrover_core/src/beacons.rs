@@ -12,6 +12,7 @@ use bevy_rapier3d::prelude::*;
 use crate::minerals::MineralMaps;
 use crate::power_cubes::RelaunchEvent;
 use crate::reward::RewardState;
+use crate::rover::{RoverAction, SpawnConfig};
 use crate::terrain_controls::TerrainState;
 use crate::ChassisEntity;
 
@@ -62,13 +63,26 @@ fn despawn_beacons_on_relaunch(
     }
 }
 
-fn load_beacon_asset(asset_server: Res<AssetServer>, mut assets: ResMut<BeaconAssets>) {
+fn load_beacon_asset(
+    asset_server: Option<Res<AssetServer>>,
+    spawn_cfg: Option<Res<SpawnConfig>>,
+    mut assets: ResMut<BeaconAssets>,
+) {
+    // Skip the glTF entirely in headless. Even when AssetPlugin is
+    // loaded (so `asset_server` exists), the Scene asset type may not
+    // be registered without bevy_scene + bevy_gltf, in which case the
+    // load call panics during handle allocation.
+    if spawn_cfg.map(|c| c.is_headless()).unwrap_or(false) {
+        return;
+    }
+    let Some(asset_server) = asset_server else { return };
     assets.scene = Some(asset_server.load("beacon_1.glb#Scene0"));
 }
 
 fn place_beacon_on_input(
     mut commands: Commands,
-    keyboard: Res<ButtonInput<KeyCode>>,
+    keyboard: Option<Res<ButtonInput<KeyCode>>>,
+    action: Option<ResMut<RoverAction>>,
     chassis_res: Res<ChassisEntity>,
     chassis_q: Query<&GlobalTransform>,
     terrain: Option<Res<TerrainState>>,
@@ -76,12 +90,27 @@ fn place_beacon_on_input(
     maps: Res<MineralMaps>,
     mut reward: ResMut<RewardState>,
 ) {
-    if !keyboard.just_pressed(KeyCode::KeyB) {
+    // Two trigger sources: B key (human play) and RoverAction.drop_beacon
+    // (RL env). The action flag is consumed (reset to false) so it acts
+    // edge-triggered like the key.
+    let key_pressed = keyboard
+        .as_ref()
+        .map(|k| k.just_pressed(KeyCode::KeyB))
+        .unwrap_or(false);
+    let action_requested = action
+        .as_ref()
+        .map(|a| a.drop_beacon)
+        .unwrap_or(false);
+    if !key_pressed && !action_requested {
         return;
     }
+    // Edge-consume the action flag.
+    if let Some(mut a) = action {
+        a.drop_beacon = false;
+    }
+
     let Some(chassis_id) = chassis_res.0 else { return };
     let Ok(chassis_gxf) = chassis_q.get(chassis_id) else { return };
-    let Some(scene) = assets.scene.as_ref() else { return };
 
     // Project the chassis forward vector onto the world XZ plane to get
     // a pure-yaw rotation; we want the beacon upright (Y world up) but
@@ -102,14 +131,10 @@ fn place_beacon_on_input(
     let world_offset = yaw_rot * Vec3::new(BEACON_BEHIND_DISTANCE, 0.0, 0.0);
     let mut beacon_pos = chassis_pos + world_offset;
 
-    // Snap to the terrain so the beacon sits on the ground regardless
-    // of the rover's suspension state.
     if let Some(terrain) = terrain {
         beacon_pos.y = terrain.height_at(beacon_pos.x, beacon_pos.z);
     }
 
-    // Try to spend a beacon from the budget. If the player has none
-    // left, refuse to place — same effect as the key being dead.
     if reward
         .try_credit_beacon(&maps, beacon_pos.x, beacon_pos.z)
         .is_none()
@@ -117,23 +142,28 @@ fn place_beacon_on_input(
         return;
     }
 
-    commands.spawn((
+    // Spawn the entity. In headless mode the scene handle is None, so
+    // we skip the visual + collider — the reward credit is the only
+    // gameplay-relevant outcome of placing a beacon, and the collider
+    // exists only to keep the rover from clipping through it in the
+    // rendered game.
+    let mut e = commands.spawn((
         Beacon,
-        SceneRoot(scene.clone()),
         Transform {
             translation: beacon_pos,
             rotation: yaw_rot,
             scale: Vec3::ONE,
         },
-        // Static body so the beacon stays planted in the ground even if
-        // the rover slams into it. Compound + Y offset places the
-        // cylinder *above* the entity origin so it lines up with the
-        // visible model rather than half-burying the collider.
-        RigidBody::Fixed,
-        Collider::compound(vec![(
-            Vect::new(0.0, BEACON_HALF_HEIGHT, 0.0),
-            Quat::IDENTITY,
-            Collider::cylinder(BEACON_HALF_HEIGHT, BEACON_RADIUS),
-        )]),
     ));
+    if let Some(scene) = assets.scene.as_ref() {
+        e.insert((
+            SceneRoot(scene.clone()),
+            RigidBody::Fixed,
+            Collider::compound(vec![(
+                Vect::new(0.0, BEACON_HALF_HEIGHT, 0.0),
+                Quat::IDENTITY,
+                Collider::cylinder(BEACON_HALF_HEIGHT, BEACON_RADIUS),
+            )]),
+        ));
+    }
 }

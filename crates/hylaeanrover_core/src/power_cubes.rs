@@ -227,7 +227,12 @@ fn setup_assets(
     ));
 }
 
-fn setup_power_ui(mut commands: Commands, ui_font: Res<UiFont>, sidebar: Res<LeftSidebar>) {
+fn setup_power_ui(
+    mut commands: Commands,
+    ui_font: Option<Res<UiFont>>,
+    sidebar: Option<Res<LeftSidebar>>,
+) {
+    let (Some(ui_font), Some(sidebar)) = (ui_font, sidebar) else { return };
     commands
         .spawn((
             Node {
@@ -484,7 +489,8 @@ fn sync_power_ui(
 
 // ---- Tutorial banner ------------------------------------------------------
 
-fn setup_tutorial_ui(mut commands: Commands, ui_font: Res<UiFont>) {
+fn setup_tutorial_ui(mut commands: Commands, ui_font: Option<Res<UiFont>>) {
+    let Some(ui_font) = ui_font else { return };
     // Sits at the top, anchored just to the right of the POWER panel so
     // the arrow visually points at the bar. Initial alpha = 0 — the
     // fade system below brings it in on hover.
@@ -570,7 +576,8 @@ fn update_tutorial_fade(
 
 // ---- Controls hint --------------------------------------------------------
 
-fn setup_controls_hint(mut commands: Commands, ui_font: Res<UiFont>) {
+fn setup_controls_hint(mut commands: Commands, ui_font: Option<Res<UiFont>>) {
+    let Some(ui_font) = ui_font else { return };
     // Bottom-centre, fades in on startup, holds, fades out.
     commands
         .spawn((
@@ -707,7 +714,8 @@ fn apply_fade(
 
 // ---- Game-over splash + relaunch button -----------------------------------
 
-fn setup_game_over_ui(mut commands: Commands, ui_font: Res<UiFont>) {
+fn setup_game_over_ui(mut commands: Commands, ui_font: Option<Res<UiFont>>) {
+    let Some(ui_font) = ui_font else { return };
     // Full-screen darkening overlay containing a centred modal card.
     commands
         .spawn((

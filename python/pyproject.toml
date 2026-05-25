@@ -1,0 +1,32 @@
+[build-system]
+requires = ["maturin>=1.4,<2"]
+build-backend = "maturin"
+
+[project]
+name = "hylaeanrover"
+version = "0.1.0"
+description = "RL environment wrapping the Hylaean Rover simulator"
+requires-python = ">=3.9"
+dependencies = [
+    "gymnasium>=0.29",
+    "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+sb3 = [
+    "stable-baselines3>=2.0",
+    "torch>=2.0",
+]
+
+[tool.maturin]
+# The Rust cdylib lives in the workspace one level up. `manifest-path`
+# tells maturin to build that crate specifically (it would otherwise
+# fail trying to build the workspace's other binaries).
+manifest-path = "../crates/hylaeanrover_py/Cargo.toml"
+# Pure-Python source lives next to this pyproject.toml.
+python-source = "."
+# Install the cdylib as `hylaeanrover._native` — a private submodule
+# the public `__init__.py` re-exports from. The Rust `#[pymodule]`
+# function is named `_native` to match.
+module-name = "hylaeanrover._native"
+features = ["pyo3/extension-module"]

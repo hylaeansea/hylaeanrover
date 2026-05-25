@@ -1,1 +1,11 @@
 /target
+
+# Python
+**/__pycache__/
+**/*.pyc
+**/.venv/
+**/*.egg-info/
+
+# Build artifacts from `maturin develop`
+**/*.so
+**/*.pyd

@@ -1,9 +1,16 @@
-[package]
-name = "hylaeanrover"
+[workspace]
+resolver = "2"
+members = [
+    "crates/hylaeanrover_core",
+    "crates/hylaeanrover_game",
+    "crates/hylaeanrover_py",
+]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
 
-[dependencies]
+[workspace.dependencies]
 bevy = "0.18.1"
 bevy_rapier3d = "0.33"
 bevy_panorbit_camera = "0.34"

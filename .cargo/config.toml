@@ -1,0 +1,17 @@
+# PyO3 extension modules use weak-linked Python symbols (resolved at
+# load time by the host interpreter). `cargo build` of a cdylib without
+# this hint fails on macOS with "symbol(s) not found" because the linker
+# tries to resolve them up-front. Maturin sets the same flags
+# automatically — these are only here so plain `cargo build` works.
+
+[target.aarch64-apple-darwin]
+rustflags = [
+  "-C", "link-arg=-undefined",
+  "-C", "link-arg=dynamic_lookup",
+]
+
+[target.x86_64-apple-darwin]
+rustflags = [
+  "-C", "link-arg=-undefined",
+  "-C", "link-arg=dynamic_lookup",
+]

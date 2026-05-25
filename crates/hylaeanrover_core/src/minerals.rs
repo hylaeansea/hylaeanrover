@@ -390,7 +390,12 @@ fn regenerate_on_seed_change(
 
 // ----- UI -----------------------------------------------------------------
 
-fn setup_mineral_ui(mut commands: Commands, ui_font: Res<UiFont>, sidebar: Res<LeftSidebar>) {
+fn setup_mineral_ui(
+    mut commands: Commands,
+    ui_font: Option<Res<UiFont>>,
+    sidebar: Option<Res<LeftSidebar>>,
+) {
+    let (Some(ui_font), Some(sidebar)) = (ui_font, sidebar) else { return };
     commands
         .spawn((
             Node {

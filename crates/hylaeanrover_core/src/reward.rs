@@ -218,7 +218,8 @@ enum RewardCell {
 
 /// Top-of-screen bar showing beacons-remaining plus the three reward
 /// contributions and the grand total — five cells, one per number.
-fn setup_reward_ui(mut commands: Commands, ui_font: Res<UiFont>) {
+fn setup_reward_ui(mut commands: Commands, ui_font: Option<Res<UiFont>>) {
+    let Some(ui_font) = ui_font else { return };
     commands
         .spawn(Node {
             position_type: PositionType::Absolute,

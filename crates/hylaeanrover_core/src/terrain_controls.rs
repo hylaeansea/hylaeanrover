@@ -270,7 +270,8 @@ fn rebuild_terrain(
 // Native UI
 // =========================================================================
 
-fn setup_ui(mut commands: Commands, ui_font: Res<UiFont>) {
+fn setup_ui(mut commands: Commands, ui_font: Option<Res<UiFont>>) {
+    let Some(ui_font) = ui_font else { return };
     commands
         .spawn((
             Node {

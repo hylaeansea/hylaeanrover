@@ -119,7 +119,9 @@ const JSON_TEXT_COLOR: Color = Color::srgba(0.75, 0.95, 1.00, 0.95);
 #[derive(Component)]
 struct TelemetryText;
 
-fn setup_telemetry_ui(mut commands: Commands, ui_font: Res<UiFont>) {
+fn setup_telemetry_ui(mut commands: Commands, ui_font: Option<Res<UiFont>>) {
+    // Headless mode: no UI plugin → no font → skip the panel.
+    let Some(ui_font) = ui_font else { return };
     commands
         .spawn((
             Node {
