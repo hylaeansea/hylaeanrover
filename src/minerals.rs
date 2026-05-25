@@ -19,6 +19,7 @@
 use bevy::prelude::*;
 use rand::{rngs::StdRng, Rng, SeedableRng};
 
+use crate::ui::UiFont;
 use crate::ChassisEntity;
 
 // ----- Element catalogue --------------------------------------------------
@@ -306,7 +307,7 @@ impl Plugin for MineralsPlugin {
 
 // ----- UI -----------------------------------------------------------------
 
-fn setup_mineral_ui(mut commands: Commands) {
+fn setup_mineral_ui(mut commands: Commands, ui_font: Res<UiFont>) {
     commands
         .spawn((
             Node {
@@ -326,7 +327,7 @@ fn setup_mineral_ui(mut commands: Commands) {
         .with_children(|panel| {
             panel.spawn((
                 Text::new("MINERAL SURVEY"),
-                TextFont { font_size: 16.0, ..default() },
+                ui_font.text(16.0),
                 TextColor(TEXT_ACCENT),
             ));
             panel.spawn((
@@ -357,12 +358,12 @@ fn setup_mineral_ui(mut commands: Commands) {
                     .with_children(|row| {
                         row.spawn((
                             Text::new(e.name),
-                            TextFont { font_size: 12.0, ..default() },
+                            ui_font.text(12.0),
                             TextColor(TEXT_MAIN),
                         ));
                         row.spawn((
                             Text::new("-- g/m³"),
-                            TextFont { font_size: 12.0, ..default() },
+                            ui_font.text(12.0),
                             TextColor(TEXT_ACCENT),
                             ElementReadText(i),
                         ));
@@ -372,7 +373,7 @@ fn setup_mineral_ui(mut commands: Commands) {
             // Small hint below the rows.
             panel.spawn((
                 Text::new("click a row to colour-code the terrain"),
-                TextFont { font_size: 10.0, ..default() },
+                ui_font.text(10.0),
                 TextColor(Color::srgba(0.55, 0.65, 0.75, 0.9)),
             ));
         });

@@ -13,6 +13,8 @@
 use bevy::prelude::*;
 use bevy::ui::RelativeCursorPosition;
 use bevy_rapier3d::prelude::*;
+
+use crate::ui::UiFont;
 use rand::Rng;
 
 use crate::terrain_controls::TerrainState;
@@ -212,7 +214,7 @@ fn setup_assets(
     ));
 }
 
-fn setup_power_ui(mut commands: Commands) {
+fn setup_power_ui(mut commands: Commands, ui_font: Res<UiFont>) {
     commands
         .spawn((
             Node {
@@ -233,7 +235,7 @@ fn setup_power_ui(mut commands: Commands) {
         .with_children(|panel| {
             panel.spawn((
                 Text::new("POWER"),
-                TextFont { font_size: 16.0, ..default() },
+                ui_font.text(16.0),
                 TextColor(TEXT_ACCENT),
             ));
 
@@ -272,7 +274,7 @@ fn setup_power_ui(mut commands: Commands) {
 
             panel.spawn((
                 Text::new("1.000 / 1.000 kWh"),
-                TextFont { font_size: 12.0, ..default() },
+                ui_font.text(12.0),
                 TextColor(TEXT_MAIN),
                 PowerText,
             ));
@@ -465,7 +467,7 @@ fn sync_power_ui(
 
 // ---- Tutorial banner ------------------------------------------------------
 
-fn setup_tutorial_ui(mut commands: Commands) {
+fn setup_tutorial_ui(mut commands: Commands, ui_font: Res<UiFont>) {
     // Sits at the top, anchored just to the right of the POWER panel so
     // the arrow visually points at the bar. Initial alpha = 0 — the
     // fade system below brings it in on hover.
@@ -488,8 +490,8 @@ fn setup_tutorial_ui(mut commands: Commands) {
         ))
         .with_children(|banner| {
             banner.spawn((
-                Text::new("<- drive over blue cubes to charge"),
-                TextFont { font_size: 14.0, ..default() },
+                Text::new("← drive over blue cubes to charge"),
+                ui_font.text(14.0),
                 TextColor(with_panel_alpha(TEXT_ACCENT, 0.0)),
             ));
         });
@@ -551,7 +553,7 @@ fn update_tutorial_fade(
 
 // ---- Controls hint --------------------------------------------------------
 
-fn setup_controls_hint(mut commands: Commands) {
+fn setup_controls_hint(mut commands: Commands, ui_font: Res<UiFont>) {
     // Bottom-centre, fades in on startup, holds, fades out.
     commands
         .spawn((
@@ -574,17 +576,17 @@ fn setup_controls_hint(mut commands: Commands) {
         .with_children(|hint| {
             hint.spawn((
                 Text::new("WASD to drive"),
-                TextFont { font_size: 13.0, ..default() },
+                ui_font.text(13.0),
                 TextColor(with_panel_alpha(TEXT_MAIN, 0.0)),
             ));
             hint.spawn((
                 Text::new("R to reset at current position"),
-                TextFont { font_size: 13.0, ..default() },
+                ui_font.text(13.0),
                 TextColor(with_panel_alpha(TEXT_MAIN, 0.0)),
             ));
             hint.spawn((
                 Text::new("Shift+R to reset at origin"),
-                TextFont { font_size: 13.0, ..default() },
+                ui_font.text(13.0),
                 TextColor(with_panel_alpha(TEXT_MAIN, 0.0)),
             ));
         });
@@ -688,7 +690,7 @@ fn apply_fade(
 
 // ---- Game-over splash + relaunch button -----------------------------------
 
-fn setup_game_over_ui(mut commands: Commands) {
+fn setup_game_over_ui(mut commands: Commands, ui_font: Res<UiFont>) {
     // Full-screen darkening overlay containing a centred modal card.
     commands
         .spawn((
@@ -723,17 +725,17 @@ fn setup_game_over_ui(mut commands: Commands) {
             .with_children(|card| {
                 card.spawn((
                     Text::new("OUT OF POWER"),
-                    TextFont { font_size: 32.0, ..default() },
+                    ui_font.text(32.0),
                     TextColor(TEXT_ACCENT),
                 ));
                 card.spawn((
                     Text::new("the rover has run dry."),
-                    TextFont { font_size: 14.0, ..default() },
+                    ui_font.text(14.0),
                     TextColor(TEXT_MAIN),
                 ));
                 card.spawn((
                     Text::new("game over"),
-                    TextFont { font_size: 14.0, ..default() },
+                    ui_font.text(14.0),
                     TextColor(TEXT_MAIN),
                 ));
                 // Relaunch button
@@ -754,7 +756,7 @@ fn setup_game_over_ui(mut commands: Commands) {
                 .with_children(|btn| {
                     btn.spawn((
                         Text::new("Relaunch"),
-                        TextFont { font_size: 16.0, ..default() },
+                        ui_font.text(16.0),
                         TextColor(TEXT_ACCENT),
                     ));
                 });

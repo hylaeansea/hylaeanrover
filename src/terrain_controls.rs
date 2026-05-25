@@ -12,6 +12,7 @@ use bevy::ui::RelativeCursorPosition;
 use bevy_rapier3d::prelude::*;
 
 use crate::terrain::{LunarTerrain, LunarTerrainConfig};
+use crate::ui::UiFont;
 
 // --- Palette (cribbed from bevyearth so the panel matches the family) ---
 const PANEL_BG: Color = Color::srgba(0.03, 0.05, 0.08, 0.82);
@@ -269,7 +270,7 @@ fn rebuild_terrain(
 // Native UI
 // =========================================================================
 
-fn setup_ui(mut commands: Commands) {
+fn setup_ui(mut commands: Commands, ui_font: Res<UiFont>) {
     commands
         .spawn((
             Node {
@@ -295,7 +296,7 @@ fn setup_ui(mut commands: Commands) {
             // Title
             panel.spawn((
                 Text::new("TERRAIN"),
-                TextFont { font_size: 16.0, ..default() },
+                ui_font.text(16.0),
                 TextColor(TEXT_ACCENT),
             ));
 
@@ -325,12 +326,12 @@ fn setup_ui(mut commands: Commands) {
                         .with_children(|row| {
                             row.spawn((
                                 Text::new("Height scale"),
-                                TextFont { font_size: 12.0, ..default() },
+                                ui_font.text(12.0),
                                 TextColor(TEXT_MAIN),
                             ));
                             row.spawn((
                                 Text::new("1.00"),
-                                TextFont { font_size: 12.0, ..default() },
+                                ui_font.text(12.0),
                                 TextColor(TEXT_ACCENT),
                                 ScaleValueText,
                             ));
@@ -344,8 +345,8 @@ fn setup_ui(mut commands: Commands) {
                             ..default()
                         })
                         .with_children(|row| {
-                            spawn_scale_button(row, "x2", ScaleButton::DoubleIt);
-                            spawn_scale_button(row, "x0.5", ScaleButton::HalfIt);
+                            spawn_scale_button(row, &ui_font, "x2", ScaleButton::DoubleIt);
+                            spawn_scale_button(row, &ui_font, "x0.5", ScaleButton::HalfIt);
                         });
                     section
                         .spawn(Node {
@@ -354,13 +355,13 @@ fn setup_ui(mut commands: Commands) {
                             ..default()
                         })
                         .with_children(|row| {
-                            spawn_scale_button(row, "+0.1", ScaleButton::PlusTenth);
-                            spawn_scale_button(row, "-0.1", ScaleButton::MinusTenth);
+                            spawn_scale_button(row, &ui_font, "+0.1", ScaleButton::PlusTenth);
+                            spawn_scale_button(row, &ui_font, "-0.1", ScaleButton::MinusTenth);
                         });
                 });
 
             // Randomize Seed button
-            spawn_button(panel, "Randomize seed", RandomizeSeedButton);
+            spawn_button(panel, &ui_font, "Randomize seed", RandomizeSeedButton);
 
             // Footer info
             panel.spawn((
@@ -383,7 +384,7 @@ fn setup_ui(mut commands: Commands) {
                 ));
                 footer.spawn((
                     Text::new("seed: --"),
-                    TextFont { font_size: 11.0, ..default() },
+                    ui_font.text(11.0),
                     TextColor(TEXT_DIM),
                     SeedValueText,
                 ));
@@ -393,6 +394,7 @@ fn setup_ui(mut commands: Commands) {
 
 fn spawn_button<'a, M: Component>(
     parent: &'a mut ChildSpawnerCommands,
+    ui_font: &UiFont,
     label: &str,
     marker: M,
 ) -> EntityCommands<'a> {
@@ -412,14 +414,14 @@ fn spawn_button<'a, M: Component>(
     ec.with_children(|btn| {
         btn.spawn((
             Text::new(label),
-            TextFont { font_size: 12.0, ..default() },
+            ui_font.text(12.0),
             TextColor(TEXT_MAIN),
         ));
     });
     ec
 }
 
-fn spawn_scale_button(parent: &mut ChildSpawnerCommands, label: &str, kind: ScaleButton) {
+fn spawn_scale_button(parent: &mut ChildSpawnerCommands, ui_font: &UiFont, label: &str, kind: ScaleButton) {
     parent
         .spawn((
             Button,
@@ -437,7 +439,7 @@ fn spawn_scale_button(parent: &mut ChildSpawnerCommands, label: &str, kind: Scal
         .with_children(|btn| {
             btn.spawn((
                 Text::new(label),
-                TextFont { font_size: 13.0, ..default() },
+                ui_font.text(13.0),
                 TextColor(TEXT_MAIN),
             ));
         });
