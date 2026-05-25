@@ -32,6 +32,7 @@ use bevy::prelude::*;
 use bevy_rapier3d::prelude::*;
 
 use crate::power_cubes::PowerCube;
+use crate::telemetry::{round1, round2, CubeTelemetry, ImuTelemetry, RoverTelemetry, WheelTelemetry};
 use crate::ui::UiFont;
 use crate::{ChassisEntity, ROVER_GROUP, WheelPosition};
 
@@ -78,8 +79,12 @@ struct CubeRowDist(usize);
 /// wheel half-height comes first). Used to size the contact ray and
 /// convert wheel ω to rolling speed.
 const WHEEL_RADIUS: f32 = 1.12;
-/// Extra margin on the contact down-ray to absorb suspension compression.
+/// Extra margin on the contact ray to absorb suspension compression.
 const CONTACT_EPS: f32 = 0.05;
+/// Angles (deg) for the contact-detection ray fan, measured from straight
+/// world-down and rotated about the wheel's spin axis. Covers ±30° of
+/// slope tilt — comfortably more than the rover can actually climb.
+const CONTACT_RAY_ANGLES_DEG: [f32; 3] = [-30.0, 0.0, 30.0];
 
 const LIDAR_RAYS: usize = 8;
 const LIDAR_MAX_RANGE: f32 = 200.0;
@@ -270,6 +275,7 @@ fn sync_imu_motion(
     time: Res<Time>,
     mut prev_linvel: Local<Option<Vec3>>,
     mut accel_smooth: Local<Vec3>,
+    mut telemetry: ResMut<RoverTelemetry>,
 ) {
     let Some(chassis_id) = chassis_res.0 else { return };
     let Ok((gxf, vel)) = chassis_q.get(chassis_id) else { return };
@@ -340,6 +346,20 @@ fn sync_imu_motion(
             ImuReadout::AccelLat => format!("{:>+5.2} m/s²", accel_lat),
         };
     }
+
+    // Mirror into the telemetry resource for the JSON readout / future
+    // RL bridge. Round here so the JSON doesn't show full-precision
+    // floats jittering each frame.
+    telemetry.imu = ImuTelemetry {
+        speed_mps:       round2(speed_mps),
+        heading_deg:     round1(heading_deg),
+        pitch_deg:       round1(pitch_deg),
+        roll_deg:        round1(roll_deg),
+        yaw_rate_deg_s:  round1(yaw_rate_deg),
+        accel_fwd_m_s2:  round2(accel_fwd),
+        accel_lat_m_s2:  round2(accel_lat),
+    };
+    telemetry.ready = true;
 }
 
 // ===== Wheel sync =========================================================
@@ -348,6 +368,7 @@ fn sync_wheel_ui(
     wheels: Query<(&GlobalTransform, &Velocity, &WheelPosition)>,
     rapier: ReadRapierContext,
     mut texts: Query<(&WheelReadoutText, &mut Text)>,
+    mut telemetry: ResMut<RoverTelemetry>,
 ) {
     let Ok(ctx) = rapier.single() else { return };
     let filter = rover_excluded_filter();
@@ -358,16 +379,20 @@ fn sync_wheel_ui(
     for (gxf, vel, &pos) in wheels.iter() {
         let center = gxf.translation();
 
-        // Contact: short down-ray from wheel center. Solid=true so a
-        // ray-origin inside a shape gets TOI=0 instead of skipping.
-        let contact_hit = ctx.cast_ray(
-            center,
-            Vec3::NEG_Y,
-            WHEEL_RADIUS + CONTACT_EPS,
-            true,
-            filter,
-        );
-        let in_contact = contact_hit.is_some();
+        // Contact: cast 3 rays from the wheel center in the wheel's
+        // rolling plane (rotated about the spin axis). A single
+        // straight-down ray misses the actual contact patch on slopes
+        // steeper than ~17°, because on an incline the wheel touches
+        // the ground at an offset point on its circumference, not the
+        // straight-down point. Three rays cover ±30° of tilt — enough
+        // for any slope the rover can actually climb — without the
+        // false-positives a longer single ray would introduce.
+        let spin_axis = gxf.rotation() * Vec3::Z;
+        let in_contact = CONTACT_RAY_ANGLES_DEG.iter().any(|&a| {
+            let dir = Quat::from_axis_angle(spin_axis, a.to_radians()) * Vec3::NEG_Y;
+            ctx.cast_ray(center, dir, WHEEL_RADIUS + CONTACT_EPS, true, filter)
+                .is_some()
+        });
 
         // Slip ratio: compare the ground-track speed the wheel *would*
         // generate by rolling (ω·r) to the actual chassis-forward speed
@@ -391,6 +416,22 @@ fn sync_wheel_ui(
             Some((true, slip))  => format!("{} ● {:>+5.2}", label, slip),
             Some((false, _))    => format!("{} ○    --", label),
             None                => format!("{}   --", label),
+        };
+    }
+
+    // Mirror into telemetry; airborne wheels report slip = 0.
+    for pos in [
+        WheelPosition::FrontLeft,
+        WheelPosition::FrontRight,
+        WheelPosition::BackLeft,
+        WheelPosition::BackRight,
+    ] {
+        let idx = wheel_index(pos);
+        let (contact, slip) = readings[idx].unwrap_or((false, 0.0));
+        telemetry.wheels[idx] = WheelTelemetry {
+            label: wheel_label(pos),
+            contact,
+            slip: round2(if contact { slip } else { 0.0 }),
         };
     }
 }
@@ -420,6 +461,7 @@ fn sync_lidar_ui(
     xforms: Query<&GlobalTransform>,
     rapier: ReadRapierContext,
     mut text_q: Query<&mut Text, With<LidarText>>,
+    mut telemetry: ResMut<RoverTelemetry>,
 ) {
     let Ok(mut text) = text_q.single_mut() else { return };
     let Some(chassis_id) = chassis_res.0 else { return };
@@ -455,6 +497,7 @@ fn sync_lidar_ui(
         let hit = ctx.cast_ray(origin, dir, LIDAR_MAX_RANGE, true, filter);
         let dist = hit.map(|(_, toi)| toi).unwrap_or(LIDAR_MAX_RANGE);
         chars.push(distance_bucket(dist));
+        telemetry.lidar_m[i] = round1(dist);
     }
 
     **text = chars;
@@ -557,6 +600,7 @@ fn sync_cube_sensor_ui(
     rapier: ReadRapierContext,
     mut angle_texts: Query<(&CubeRowAngle, &mut Text), Without<CubeRowDist>>,
     mut dist_texts: Query<(&CubeRowDist, &mut Text), Without<CubeRowAngle>>,
+    mut telemetry: ResMut<RoverTelemetry>,
 ) {
     let mut visible: Vec<(f32, f32)> = Vec::new();
 
@@ -619,4 +663,16 @@ fn sync_cube_sensor_ui(
             None => "--".to_string(),
         };
     }
+
+    // Mirror the closest N into telemetry — the rover's "cube sensor"
+    // has finite channel capacity, same N rows as the UI. `visible` was
+    // already sorted by distance and truncated to MAX_VISIBLE_CUBES
+    // above, so the agent sees the same closest-N the human sees.
+    telemetry.visible_cubes = visible
+        .into_iter()
+        .map(|(bearing_deg, distance_m)| CubeTelemetry {
+            bearing_deg: round1(bearing_deg),
+            distance_m: round1(distance_m),
+        })
+        .collect();
 }

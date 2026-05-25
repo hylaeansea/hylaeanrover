@@ -263,6 +263,16 @@ impl MineralMaps {
             .unwrap_or(0.0)
     }
 
+    /// (name, surface concentration g/m³) for every tracked element at
+    /// the given world XZ position. For the telemetry JSON readout.
+    pub fn surface_all_at(&self, x: f32, z: f32) -> Vec<(&'static str, f32)> {
+        ELEMENTS
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (e.name, self.surface_at(i, x, z)))
+            .collect()
+    }
+
     /// Hidden from the HUD; will drive future beacon-scoring.
     #[allow(dead_code)]
     pub fn subsurface_at(&self, element: usize, x: f32, z: f32) -> f32 {

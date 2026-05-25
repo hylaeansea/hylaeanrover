@@ -12,6 +12,7 @@ mod beacons;
 mod imu;
 mod minerals;
 mod power_cubes;
+mod telemetry;
 mod terrain;
 mod terrain_controls;
 mod ui;
@@ -19,6 +20,7 @@ use beacons::BeaconsPlugin;
 use imu::ImuPlugin;
 use minerals::MineralsPlugin;
 use power_cubes::PowerCubesPlugin;
+use telemetry::TelemetryPlugin;
 use ui::{UiFont, UiFontPlugin};
 use terrain_controls::{cursor_over_terrain_panel, TerrainControlsPlugin, TerrainPanel};
 
@@ -54,6 +56,10 @@ fn main() {
         // Left-side HUD with speed / heading / pitch / roll — IMU-like
         // telemetry for RL observation features.
         .add_plugins(ImuPlugin)
+        // Bottom-of-screen JSON observation readout — same shape an RL
+        // agent would receive over the wire. Reads RoverTelemetry +
+        // PowerState + MineralMaps.
+        .add_plugins(TelemetryPlugin)
         // Initialize the chassis resource as empty — attach_physics will fill it
         .init_resource::<ChassisEntity>()
         .init_resource::<CameraMode>()
