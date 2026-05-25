@@ -1,0 +1,18 @@
+[package]
+name = "hylaeanrover_py"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+# `cdylib` makes this build into a Python-loadable extension module.
+# `rlib` lets `cargo test` link the same code as a normal Rust lib.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+hylaeanrover_core = { path = "../hylaeanrover_core" }
+# bevy/debug surfaces system names in ECS panic messages — invaluable
+# when something in the headless schedule blows up.
+bevy = { workspace = true, features = ["debug"] }
+bevy_rapier3d = { workspace = true }
+pyo3 = { version = "0.22", features = ["extension-module", "abi3-py39"] }
+serde_json = { workspace = true }

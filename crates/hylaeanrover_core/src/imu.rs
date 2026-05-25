@@ -104,7 +104,13 @@ fn rover_excluded_filter() -> QueryFilter<'static> {
 
 // ===== IMU panel setup ====================================================
 
-fn setup_imu_ui(mut commands: Commands, ui_font: Res<UiFont>, sidebar: Res<LeftSidebar>) {
+fn setup_imu_ui(
+    mut commands: Commands,
+    ui_font: Option<Res<UiFont>>,
+    sidebar: Option<Res<LeftSidebar>>,
+) {
+    // Headless mode: UI plugin not loaded → skip the panel.
+    let (Some(ui_font), Some(sidebar)) = (ui_font, sidebar) else { return };
     commands
         .spawn((
             Node {
@@ -309,7 +315,10 @@ fn sync_lidar_ui(
     mut text_q: Query<&mut Text, With<LidarText>>,
     mut telemetry: ResMut<RoverTelemetry>,
 ) {
-    let Ok(mut text) = text_q.single_mut() else { return };
+    // Note the ORDER here matters for headless: the LidarText query
+    // returning Err just means "no UI to update" — we must still cast
+    // the rays and write the telemetry. Previously this early-returned
+    // on missing text and silently left lidar_m at zero for RL.
     let Some(chassis_id) = chassis_res.0 else { return };
     let Ok(gxf) = xforms.get(chassis_id) else { return };
     let Ok(ctx) = rapier.single() else { return };
@@ -346,7 +355,11 @@ fn sync_lidar_ui(
         telemetry.lidar_m[i] = round1(dist);
     }
 
-    **text = chars;
+    // UI update is optional — headless has no LidarText entity, but
+    // the telemetry above has already been written.
+    if let Ok(mut text) = text_q.single_mut() {
+        **text = chars;
+    }
 }
 
 /// Closer = taller block. ▁ is reserved for "no hit / very far".
@@ -363,7 +376,12 @@ fn distance_bucket(d: f32) -> char {
 
 // ===== Cube sensor panel ==================================================
 
-fn setup_cube_sensor_ui(mut commands: Commands, ui_font: Res<UiFont>, sidebar: Res<LeftSidebar>) {
+fn setup_cube_sensor_ui(
+    mut commands: Commands,
+    ui_font: Option<Res<UiFont>>,
+    sidebar: Option<Res<LeftSidebar>>,
+) {
+    let (Some(ui_font), Some(sidebar)) = (ui_font, sidebar) else { return };
     commands
         .spawn((
             Node {
