@@ -15,7 +15,7 @@ The repo contains:
 
 ![Rover sitting on the landing pad at game start, with the full HUD visible.](https://hylaeansea.org/assets/images/hylaeanrover_screenshot_begingame_readme.png)
 
-<video src="https://hylaeansea.org/assets/images/hylaeanrover_readme.mp4" controls muted loop width="100%"></video>
+<video src="https://raw.githubusercontent.com/hylaeansea/hylaeansea.github.io/main/assets/images/hylaeanrover_readme.mp4" controls muted loop width="100%"></video>
 
 The HUD shows everything the simulation is tracking. Left column:
 **POWER** reserve in kWh, **MINERAL SURVEY** with surface
