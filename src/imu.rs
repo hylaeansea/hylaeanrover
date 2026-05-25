@@ -522,8 +522,10 @@ fn setup_cube_sensor_ui(mut commands: Commands, ui_font: Res<UiFont>) {
         .spawn((
             Node {
                 position_type: PositionType::Absolute,
-                // Below the (now much taller) IMU panel.
-                top: Val::Px(685.0),
+                // Below the IMU panel — which is ≈340 px tall now that
+                // it stacks motion + wheels + lidar subsections, so this
+                // sits at 360 (IMU top) + 340 (IMU height) + ~30 (gap).
+                top: Val::Px(730.0),
                 left: Val::Px(0.0),
                 width: Val::Px(240.0),
                 padding: UiRect::all(Val::Px(14.0)),
