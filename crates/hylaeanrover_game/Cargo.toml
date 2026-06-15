@@ -12,3 +12,8 @@ hylaeanrover_core = { path = "../hylaeanrover_core" }
 bevy = { workspace = true }
 bevy_rapier3d = { workspace = true }
 bevy_panorbit_camera = { workspace = true }
+# Pure-Rust ONNX inference for the in-game autopilot (loads a policy
+# exported from the SB3 training run). No C++/Python runtime dependency.
+tract-onnx = "0.21"
+serde_json = { workspace = true }
+anyhow = "1"

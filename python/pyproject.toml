@@ -16,6 +16,10 @@ dependencies = [
 sb3 = [
     "stable-baselines3>=2.0",
     "torch>=2.0",
+    "tensorboard>=2.12",
+    # `onnx` is needed by examples/export_policy.py to export a trained
+    # policy for the in-game autopilot.
+    "onnx>=1.15",
 ]
 
 [tool.maturin]

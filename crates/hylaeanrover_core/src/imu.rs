@@ -27,7 +27,7 @@ use bevy::prelude::*;
 use bevy_rapier3d::prelude::*;
 
 use crate::power_cubes::PowerCube;
-use crate::telemetry::{round1, round2, CubeTelemetry, ImuTelemetry, RoverTelemetry};
+use crate::telemetry::{CubeTelemetry, ImuTelemetry, RoverTelemetry, round1, round2};
 use crate::ui::{LeftSidebar, LeftSidebarSet, UiFont};
 use crate::{ChassisEntity, ROVER_GROUP};
 
@@ -110,7 +110,9 @@ fn setup_imu_ui(
     sidebar: Option<Res<LeftSidebar>>,
 ) {
     // Headless mode: UI plugin not loaded → skip the panel.
-    let (Some(ui_font), Some(sidebar)) = (ui_font, sidebar) else { return };
+    let (Some(ui_font), Some(sidebar)) = (ui_font, sidebar) else {
+        return;
+    };
     commands
         .spawn((
             Node {
@@ -134,11 +136,11 @@ fn setup_imu_ui(
             divider(panel);
 
             // --- Motion readouts ---
-            row(panel, &ui_font, "speed",     ImuReadout::Speed);
-            row(panel, &ui_font, "heading",   ImuReadout::Heading);
-            row(panel, &ui_font, "pitch",     ImuReadout::Pitch);
-            row(panel, &ui_font, "roll",      ImuReadout::Roll);
-            row(panel, &ui_font, "yaw rate",  ImuReadout::YawRate);
+            row(panel, &ui_font, "speed", ImuReadout::Speed);
+            row(panel, &ui_font, "heading", ImuReadout::Heading);
+            row(panel, &ui_font, "pitch", ImuReadout::Pitch);
+            row(panel, &ui_font, "roll", ImuReadout::Roll);
+            row(panel, &ui_font, "yaw rate", ImuReadout::YawRate);
             row(panel, &ui_font, "accel fwd", ImuReadout::AccelFwd);
             row(panel, &ui_font, "accel lat", ImuReadout::AccelLat);
 
@@ -178,11 +180,7 @@ fn subheader(panel: &mut ChildSpawnerCommands, ui_font: &UiFont, label: &str) {
             margin: UiRect::top(Val::Px(4.0)),
             ..default()
         },
-        children![(
-            Text::new(label),
-            ui_font.text(11.0),
-            TextColor(TEXT_DIM),
-        )],
+        children![(Text::new(label), ui_font.text(11.0), TextColor(TEXT_DIM),)],
     ));
     divider(panel);
 }
@@ -196,11 +194,7 @@ fn row(panel: &mut ChildSpawnerCommands, ui_font: &UiFont, label: &str, kind: Im
             ..default()
         })
         .with_children(|r| {
-            r.spawn((
-                Text::new(label),
-                ui_font.text(12.0),
-                TextColor(TEXT_MAIN),
-            ));
+            r.spawn((Text::new(label), ui_font.text(12.0), TextColor(TEXT_MAIN)));
             r.spawn((
                 Text::new("--"),
                 ui_font.text(12.0),
@@ -221,8 +215,12 @@ fn sync_imu_motion(
     mut accel_smooth: Local<Vec3>,
     mut telemetry: ResMut<RoverTelemetry>,
 ) {
-    let Some(chassis_id) = chassis_res.0 else { return };
-    let Ok((gxf, vel)) = chassis_q.get(chassis_id) else { return };
+    let Some(chassis_id) = chassis_res.0 else {
+        return;
+    };
+    let Ok((gxf, vel)) = chassis_q.get(chassis_id) else {
+        return;
+    };
 
     let linvel = vel.map(|v| v.linvel).unwrap_or(Vec3::ZERO);
     let angvel = vel.map(|v| v.angvel).unwrap_or(Vec3::ZERO);
@@ -281,11 +279,11 @@ fn sync_imu_motion(
 
     for (kind, mut text) in texts.iter_mut() {
         **text = match kind {
-            ImuReadout::Speed    => format!("{:>5.2} m/s",  speed_mps),
-            ImuReadout::Heading  => format!("{:>5.1}°",     heading_deg),
-            ImuReadout::Pitch    => format!("{:>+5.1}°",    pitch_deg),
-            ImuReadout::Roll     => format!("{:>+6.1}°",    roll_deg),
-            ImuReadout::YawRate  => format!("{:>+5.1}°/s",  yaw_rate_deg),
+            ImuReadout::Speed => format!("{:>5.2} m/s", speed_mps),
+            ImuReadout::Heading => format!("{:>5.1}°", heading_deg),
+            ImuReadout::Pitch => format!("{:>+5.1}°", pitch_deg),
+            ImuReadout::Roll => format!("{:>+6.1}°", roll_deg),
+            ImuReadout::YawRate => format!("{:>+5.1}°/s", yaw_rate_deg),
             ImuReadout::AccelFwd => format!("{:>+5.2} m/s²", accel_fwd),
             ImuReadout::AccelLat => format!("{:>+5.2} m/s²", accel_lat),
         };
@@ -295,13 +293,13 @@ fn sync_imu_motion(
     // RL bridge. Round here so the JSON doesn't show full-precision
     // floats jittering each frame.
     telemetry.imu = ImuTelemetry {
-        speed_mps:       round2(speed_mps),
-        heading_deg:     round1(heading_deg),
-        pitch_deg:       round1(pitch_deg),
-        roll_deg:        round1(roll_deg),
-        yaw_rate_deg_s:  round1(yaw_rate_deg),
-        accel_fwd_m_s2:  round2(accel_fwd),
-        accel_lat_m_s2:  round2(accel_lat),
+        speed_mps: round2(speed_mps),
+        heading_deg: round1(heading_deg),
+        pitch_deg: round1(pitch_deg),
+        roll_deg: round1(roll_deg),
+        yaw_rate_deg_s: round1(yaw_rate_deg),
+        accel_fwd_m_s2: round2(accel_fwd),
+        accel_lat_m_s2: round2(accel_lat),
     };
     telemetry.ready = true;
 }
@@ -319,8 +317,12 @@ fn sync_lidar_ui(
     // returning Err just means "no UI to update" — we must still cast
     // the rays and write the telemetry. Previously this early-returned
     // on missing text and silently left lidar_m at zero for RL.
-    let Some(chassis_id) = chassis_res.0 else { return };
-    let Ok(gxf) = xforms.get(chassis_id) else { return };
+    let Some(chassis_id) = chassis_res.0 else {
+        return;
+    };
+    let Ok(gxf) = xforms.get(chassis_id) else {
+        return;
+    };
     let Ok(ctx) = rapier.single() else { return };
 
     // Sensor mast: a half-meter above chassis center so a ray cast on a
@@ -364,14 +366,23 @@ fn sync_lidar_ui(
 
 /// Closer = taller block. ▁ is reserved for "no hit / very far".
 fn distance_bucket(d: f32) -> char {
-    if d < 3.0   { '█' }
-    else if d < 8.0   { '▇' }
-    else if d < 15.0  { '▆' }
-    else if d < 25.0  { '▅' }
-    else if d < 40.0  { '▄' }
-    else if d < 60.0  { '▃' }
-    else if d < 100.0 { '▂' }
-    else              { '▁' }
+    if d < 3.0 {
+        '█'
+    } else if d < 8.0 {
+        '▇'
+    } else if d < 15.0 {
+        '▆'
+    } else if d < 25.0 {
+        '▅'
+    } else if d < 40.0 {
+        '▄'
+    } else if d < 60.0 {
+        '▃'
+    } else if d < 100.0 {
+        '▂'
+    } else {
+        '▁'
+    }
 }
 
 // ===== Cube sensor panel ==================================================
@@ -381,7 +392,9 @@ fn setup_cube_sensor_ui(
     ui_font: Option<Res<UiFont>>,
     sidebar: Option<Res<LeftSidebar>>,
 ) {
-    let (Some(ui_font), Some(sidebar)) = (ui_font, sidebar) else { return };
+    let (Some(ui_font), Some(sidebar)) = (ui_font, sidebar) else {
+        return;
+    };
     commands
         .spawn((
             Node {
@@ -417,11 +430,7 @@ fn setup_cube_sensor_ui(
                         ui_font.text(10.0),
                         TextColor(TEXT_DIM),
                     ));
-                    r.spawn((
-                        Text::new("range"),
-                        ui_font.text(10.0),
-                        TextColor(TEXT_DIM),
-                    ));
+                    r.spawn((Text::new("range"), ui_font.text(10.0), TextColor(TEXT_DIM)));
                 });
 
             for i in 0..MAX_VISIBLE_CUBES {
@@ -465,46 +474,45 @@ fn sync_cube_sensor_ui(
 ) {
     let mut visible: Vec<(f32, f32)> = Vec::new();
 
-    if let Some(chassis_id) = chassis_res.0 {
-        if let Ok(chassis_gxf) = xforms.get(chassis_id) {
-            if let Ok(ctx) = rapier.single() {
-                let origin = chassis_gxf.translation();
-                let rot = chassis_gxf.rotation();
-                let fwd3 = rot * Vec3::NEG_X;
-                let fwd = Vec2::new(fwd3.x, fwd3.z);
-                if fwd.length_squared() >= 1e-6 {
-                    let fwd = fwd.normalize();
-                    let filter = rover_excluded_filter();
+    if let Some(chassis_id) = chassis_res.0
+        && let Ok(chassis_gxf) = xforms.get(chassis_id)
+        && let Ok(ctx) = rapier.single()
+    {
+        let origin = chassis_gxf.translation();
+        let rot = chassis_gxf.rotation();
+        let fwd3 = rot * Vec3::NEG_X;
+        let fwd = Vec2::new(fwd3.x, fwd3.z);
+        if fwd.length_squared() >= 1e-6 {
+            let fwd = fwd.normalize();
+            let filter = rover_excluded_filter();
 
-                    for (cube_entity, cube_gxf) in cubes.iter() {
-                        let cube_pos = cube_gxf.translation();
-                        let delta3 = cube_pos - origin;
-                        let delta = Vec2::new(delta3.x, delta3.z);
-                        let dist_xz = delta.length();
-                        if dist_xz < 1e-3 {
-                            continue;
-                        }
-                        let to_cube = delta / dist_xz;
-
-                        let cross_y = fwd.x * to_cube.y - fwd.y * to_cube.x;
-                        let dot = fwd.dot(to_cube);
-                        let bearing_deg = cross_y.atan2(dot).to_degrees();
-
-                        if bearing_deg.abs() > VIEW_HALF_ANGLE_DEG {
-                            continue;
-                        }
-
-                        let dir3 = (cube_pos - origin).normalize();
-                        let max_toi = (cube_pos - origin).length() + 0.5;
-                        let hit = ctx.cast_ray(origin, dir3, max_toi, true, filter);
-                        let los_clear = matches!(hit, Some((e, _)) if e == cube_entity);
-                        if !los_clear {
-                            continue;
-                        }
-
-                        visible.push((bearing_deg, dist_xz));
-                    }
+            for (cube_entity, cube_gxf) in cubes.iter() {
+                let cube_pos = cube_gxf.translation();
+                let delta3 = cube_pos - origin;
+                let delta = Vec2::new(delta3.x, delta3.z);
+                let dist_xz = delta.length();
+                if dist_xz < 1e-3 {
+                    continue;
                 }
+                let to_cube = delta / dist_xz;
+
+                let cross_y = fwd.x * to_cube.y - fwd.y * to_cube.x;
+                let dot = fwd.dot(to_cube);
+                let bearing_deg = cross_y.atan2(dot).to_degrees();
+
+                if bearing_deg.abs() > VIEW_HALF_ANGLE_DEG {
+                    continue;
+                }
+
+                let dir3 = (cube_pos - origin).normalize();
+                let max_toi = (cube_pos - origin).length() + 0.5;
+                let hit = ctx.cast_ray(origin, dir3, max_toi, true, filter);
+                let los_clear = matches!(hit, Some((e, _)) if e == cube_entity);
+                if !los_clear {
+                    continue;
+                }
+
+                visible.push((bearing_deg, dist_xz));
             }
         }
     }

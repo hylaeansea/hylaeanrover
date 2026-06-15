@@ -89,6 +89,10 @@ run` is fast.
 | **F1** | Toggle Rapier collision wireframes |
 | *(click)* in orbit mode | Drag to orbit, right-drag to pan, scroll to zoom |
 
+When launched with a trained policy (`--policy`, see *Watching a trained
+agent* below) two more keys are active: **P** toggles autopilot on/off,
+**O** hot-reloads the policy file from disk.
+
 The bottom of the window shows a continuously-updated JSON dump of
 the **same observation an RL agent sees** — useful for debugging or
 just understanding what's in the agent's input space.
@@ -155,8 +159,30 @@ for _ in range(1000):
 env.close()
 ```
 
-Action layout (10 discrete) and the 47-float observation schema are
-documented in detail in [`python/README.md`](python/README.md).
+Action layout (10 discrete) and the 42-float observation schema — plus
+the staged training curriculum (locomotion → minerals → full) — are
+documented in detail in [`python/README.md`](python/README.md) and
+[`docs/rl_training_plan.md`](docs/rl_training_plan.md).
+
+### Watching a trained agent
+
+Training is headless. To watch a trained policy drive in the **full
+rendered game** (HUD, lidar, overlays, camera), export it to ONNX and
+launch the game with `--policy`:
+
+```bash
+# from python/, with the venv active
+python examples/export_policy.py \
+    --model runs/stage0/model.zip --vecnorm runs/stage0/vecnorm.pkl
+
+cargo run -p hylaeanrover_game --release -- --policy runs/stage0/model.onnx
+```
+
+The policy runs natively in the game via `tract-onnx` (no Python in the
+loop). Press **P** to toggle autopilot vs. manual driving, and **O** to
+hot-reload the policy — so you can re-export a newer checkpoint mid-run
+and watch progress. See [`docs/rl_training_plan.md`](docs/rl_training_plan.md)
+for details.
 
 ---
 
@@ -177,20 +203,28 @@ hylaeanrover/
 │   │       ├── minerals.rs               6-element procedural concentration maps
 │   │       ├── power_cubes.rs            cubes, energy reserve, game-over modal
 │   │       ├── reward.rs                 RewardState + scoring + top-bar UI
+│   │       ├── observation.rs            shared 42-float obs builder (env + autopilot)
 │   │       ├── telemetry.rs              RL observation resource + JSON readout
 │   │       ├── terrain.rs                heightfield + crater stamping
 │   │       ├── terrain_controls.rs       right-side terrain panel + regen
 │   │       └── ui.rs                     LeftSidebar container + UiFont resource
 │   ├── hylaeanrover_game/                playable binary
 │   │   ├── assets/                       glTF rover + beacon + fonts
-│   │   └── src/main.rs                   DefaultPlugins + camera + RoverCorePlugin
+│   │   └── src/
+│   │       ├── main.rs                   DefaultPlugins + camera + RoverCorePlugin
+│   │       └── autopilot.rs              ONNX-policy autopilot (tract-onnx)
 │   └── hylaeanrover_py/                  cdylib for Python / SB3
 │       └── src/lib.rs                    RoverEnv pyclass, fixed-timestep stepping
-└── python/
-    ├── pyproject.toml                    maturin packaging
-    ├── README.md                         full action / observation schema docs
-    ├── hylaeanrover/__init__.py          gymnasium.Env wrapper
-    └── examples/train_ppo.py             SB3 PPO smoke test
+├── python/
+│   ├── pyproject.toml                    maturin packaging
+│   ├── README.md                         action/obs schema + training/eval docs
+│   ├── hylaeanrover/
+│   │   ├── __init__.py                   gymnasium.Env wrapper
+│   │   ├── wrappers.py                   staged reward, action-repeat, env factory
+│   │   └── export.py                     SB3 policy → ONNX bundle
+│   └── examples/                         train / evaluate / export / promote / smoke
+├── models/                               curated best-per-stage bundles (tracked)
+└── docs/rl_training_plan.md              RL curriculum design + progress log
 ```
 
 The same `RoverCorePlugin` is wired into both the game's

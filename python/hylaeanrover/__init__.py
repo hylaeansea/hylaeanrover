@@ -46,6 +46,7 @@ class RoverEnv(gym.Env):
         seed: int = 42,
         max_steps: int = 2000,
         render_mode: Optional[str] = None,
+        beacons_enabled: bool = True,
     ) -> None:
         super().__init__()
         if render_mode is not None and render_mode != "rgb_array":
@@ -57,8 +58,15 @@ class RoverEnv(gym.Env):
                 "Headless training is the only mode this branch ships."
             )
         self.render_mode = render_mode
+        # When False, action index 9 (drop beacon) is an inert no-op and
+        # the `beacons_deployed` game-over never fires — used by the RL
+        # curriculum's locomotion / mineral stages so the action space
+        # stays Discrete(10) across all stages (clean weight transfer).
+        self.beacons_enabled = beacons_enabled
 
-        self._env = _RustRoverEnv(seed=seed, max_steps=max_steps)
+        self._env = _RustRoverEnv(
+            seed=seed, max_steps=max_steps, beacons_enabled=beacons_enabled
+        )
         self._obs_dim = _RustRoverEnv.obs_dim()
         self._action_count = _RustRoverEnv.action_count()
 
@@ -80,7 +88,17 @@ class RoverEnv(gym.Env):
         options: Optional[dict[str, Any]] = None,
     ) -> tuple[np.ndarray, dict[str, Any]]:
         del options  # not used (kept for the gymnasium signature)
-        obs_list, info_json = self._env.reset(seed)
+        # Seed the gym RNG (deterministic iff `seed` is given), then draw a
+        # fresh terrain seed from it for *every* episode. SB3's autoreset
+        # calls reset() with seed=None; without this, np_random would not
+        # advance and every episode would reuse the construction-time
+        # terrain — the policy would overfit one map and any baseline-vs-
+        # trained comparison would be on a single terrain. Drawing from the
+        # RNG keeps it reproducible when a seed is supplied and varied (true
+        # domain randomization) when it isn't.
+        super().reset(seed=seed)
+        terrain_seed = int(self.np_random.integers(0, 2**31 - 1))
+        obs_list, info_json = self._env.reset(terrain_seed)
         obs = np.asarray(obs_list, dtype=np.float32)
         info = json.loads(info_json) if info_json else {}
         return obs, info

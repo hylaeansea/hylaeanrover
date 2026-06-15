@@ -1,15 +1,16 @@
-// PyO3 0.22's macro-generated trampolines don't comply with edition
-// 2024's stricter `unsafe_op_in_unsafe_fn` lint. The generated unsafe
-// blocks are correct, so silence the noise rather than carry warnings.
-#![allow(unsafe_op_in_unsafe_fn)]
+// PyO3 0.22's macro-generated trampolines trip a couple of lints we
+// can't fix in our source: edition 2024's stricter `unsafe_op_in_unsafe_fn`,
+// and clippy's `useless_conversion` (the `#[pymethods]` expansion adds an
+// `.into()` on the returned `PyErr`). The generated code is correct, so
+// silence the noise rather than carry warnings.
+#![allow(unsafe_op_in_unsafe_fn, clippy::useless_conversion)]
 
 //! PyO3 extension module: `RoverEnv` Python class wrapping a headless
 //! Bevy `App` so SB3 can drive it with `reset` / `step`.
 //!
 //! Architecture:
 //!   * Each `RoverEnv` instance owns a `bevy::App` with `MinimalPlugins`
-//!     + `RoverCorePlugin::headless()`. No window, no rendering, no
-//!     glTF.
+//!     + `RoverCorePlugin::headless()` — no window, rendering, or glTF.
 //!   * `step(action)` writes `RoverAction` into the app, advances the
 //!     schedule once via `app.update()`, then reads the resulting
 //!     `RoverTelemetry`, `RewardState`, and `GameState` back out.
@@ -25,18 +26,18 @@ use std::time::Duration;
 
 use bevy::app::ScheduleRunnerPlugin;
 use bevy::asset::AssetPlugin;
+use bevy::diagnostic::DiagnosticsPlugin;
+use bevy::input::InputPlugin;
+use bevy::mesh::Mesh;
 use bevy::pbr::StandardMaterial;
 use bevy::prelude::*;
-use bevy::mesh::Mesh;
 use bevy::scene::ScenePlugin;
 use bevy::time::TimeUpdateStrategy;
 use bevy::transform::TransformPlugin;
-use bevy::diagnostic::DiagnosticsPlugin;
-use bevy::input::InputPlugin;
 
 use hylaeanrover_core::game_state::{GameOverReason, GameState, GameStatus};
 use hylaeanrover_core::power_cubes::{PowerState, RelaunchEvent};
-use hylaeanrover_core::reward::{RewardState, BEACON_BUDGET};
+use hylaeanrover_core::reward::{BEACON_BUDGET, RewardState};
 use hylaeanrover_core::telemetry::RoverTelemetry;
 use hylaeanrover_core::terrain_controls::TerrainState;
 use hylaeanrover_core::{ChassisEntity, RoverAction, RoverCoreConfig, RoverCorePlugin};
@@ -48,16 +49,11 @@ use pyo3::prelude::*;
 /// and game.
 const FIXED_DT: f32 = 1.0 / 60.0;
 
-/// Observation layout — flattened f32 vector. Constants here document
-/// the slot ranges; tests / Python code should treat them as the
-/// source of truth.
-///
-/// Total size: 7 (imu) + 8 (lidar) + 18 (6 cubes × 3 fields: bearing,
-/// range, valid) + 2 (power) + 6 (minerals) + 4 (reward) + 1 (beacons)
-/// + 1 (game_over flag) = 47.
-const OBS_DIM: usize = 47;
-
-const MAX_VISIBLE_CUBES: usize = 6;
+/// Observation layout — see `hylaeanrover_core::observation` for the
+/// authoritative slot map. The builder lives in the core crate so the
+/// headless env and the in-game autopilot feed the policy *identical*
+/// vectors.
+const OBS_DIM: usize = hylaeanrover_core::observation::OBS_DIM;
 
 /// Bevy's `App` is `!Send`, so we mark the pyclass `unsendable` —
 /// Python can only access the env from the thread that created it.
@@ -79,7 +75,7 @@ struct EnvInner {
 }
 
 impl EnvInner {
-    fn new(seed: u64, max_steps: u32) -> Self {
+    fn new(seed: u64, max_steps: u32, beacons_enabled: bool) -> Self {
         let mut app = App::new();
 
         // MinimalPlugins gives us TaskPool / Time / Schedule infra
@@ -106,12 +102,16 @@ impl EnvInner {
         .init_asset::<Mesh>()
         .init_asset::<StandardMaterial>()
         // Fixed per-frame time delta so physics is reproducible.
-        .insert_resource(TimeUpdateStrategy::ManualDuration(
-            Duration::from_secs_f64(FIXED_DT as f64),
-        ));
+        .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
+            FIXED_DT as f64,
+        )));
 
-        // Headless core: no UI, primitive rover spawn (no glTF).
-        app.add_plugins(RoverCorePlugin(RoverCoreConfig::headless()));
+        // Headless core: no UI, primitive rover spawn (no glTF). The
+        // beacon toggle lets the RL curriculum's locomotion / mineral
+        // stages neutralize action index 9 (see RoverCoreConfig).
+        let mut core_cfg = RoverCoreConfig::headless();
+        core_cfg.beacons_enabled = beacons_enabled;
+        app.add_plugins(RoverCorePlugin(core_cfg));
 
         // Seed the action resource so the drive system always finds it.
         app.insert_resource(RoverAction::default());
@@ -127,7 +127,13 @@ impl EnvInner {
         // For now, store the requested seed so reset() can apply it.
         let _ = seed;
 
-        Self { app, seed, step_count: 0, max_steps, last_total_reward: 0.0 }
+        Self {
+            app,
+            seed,
+            step_count: 0,
+            max_steps,
+            last_total_reward: 0.0,
+        }
     }
 
     /// Apply a discrete action [0..9].
@@ -151,78 +157,23 @@ impl EnvInner {
         let telem = world.resource::<RoverTelemetry>();
         let reward = world.resource::<RewardState>();
         let power = world.resource::<PowerState>();
-        let state = world.resource::<GameState>();
+        let maps = world.resource::<hylaeanrover_core::minerals::MineralMaps>();
 
-        let mut obs = Vec::with_capacity(OBS_DIM);
+        // Chassis world position for mineral sampling (None until spawn).
+        let chassis_pos = world
+            .resource::<ChassisEntity>()
+            .0
+            .and_then(|id| world.get::<GlobalTransform>(id))
+            .map(|gxf| gxf.translation());
 
-        // ---- IMU (7) ----
-        let imu = telem.imu;
-        obs.extend([
-            imu.speed_mps,
-            imu.heading_deg,
-            imu.pitch_deg,
-            imu.roll_deg,
-            imu.yaw_rate_deg_s,
-            imu.accel_fwd_m_s2,
-            imu.accel_lat_m_s2,
-        ]);
-
-        // ---- Lidar (8) ----
-        obs.extend(telem.lidar_m.iter().copied());
-
-        // ---- Visible cubes (6 × 3) ----
-        // Padded layout: for each slot, [bearing_deg, distance_m, valid].
-        // `valid` = 1.0 if a cube fills the slot else 0.0 so the agent
-        // can tell apart "no cube" from "cube straight ahead at 0 m".
-        for i in 0..MAX_VISIBLE_CUBES {
-            match telem.visible_cubes.get(i) {
-                Some(c) => obs.extend([c.bearing_deg, c.distance_m, 1.0]),
-                None => obs.extend([0.0, 0.0, 0.0]),
-            }
-        }
-
-        // ---- Power (2) ----
-        obs.extend([power.current / power.max, power.current]);
-
-        // ---- Mineral concentrations under the rover (6) ----
-        // Sample at the chassis's current XZ.
-        if let Some(chassis_id) = world.resource::<ChassisEntity>().0 {
-            if let Some(gxf) = world.get::<GlobalTransform>(chassis_id) {
-                let pos = gxf.translation();
-                let maps = world.resource::<hylaeanrover_core::minerals::MineralMaps>();
-                for (_, value) in maps.surface_all_at(pos.x, pos.z) {
-                    obs.push(value);
-                }
-            } else {
-                obs.extend([0.0; 6]);
-            }
-        } else {
-            obs.extend([0.0; 6]);
-        }
-
-        // ---- Reward breakdown (4) ----
-        obs.extend([
-            reward.total(),
-            reward.distance,
-            reward.mineral_integral,
-            reward.beacon_bonus,
-        ]);
-
-        // ---- Beacons remaining (1) ----
-        obs.push(reward.beacons_remaining as f32);
-
-        // ---- Game-over flag (1) ----
-        obs.push(match state.status {
-            GameStatus::Playing => 0.0,
-            GameStatus::GameOver(_) => 1.0,
-        });
-
-        debug_assert_eq!(obs.len(), OBS_DIM, "obs length must match OBS_DIM");
-        obs
+        hylaeanrover_core::observation::build_observation(telem, power, reward, chassis_pos, maps)
     }
 
     fn is_terminated(&self) -> bool {
-        !matches!(self.app.world().resource::<GameState>().status, GameStatus::Playing)
+        !matches!(
+            self.app.world().resource::<GameState>().status,
+            GameStatus::Playing
+        )
     }
 
     fn game_over_str(&self) -> Option<&'static str> {
@@ -255,11 +206,14 @@ impl EnvInner {
 impl RoverEnv {
     /// Create a fresh environment. `seed` controls terrain + mineral
     /// generation. `max_steps` caps an episode before SB3 calls it a
-    /// `truncated` rollout.
+    /// `truncated` rollout. `beacons_enabled` (default `true`) gates the
+    /// beacon action: set it `false` in the RL curriculum's locomotion /
+    /// mineral stages so action index 9 is an inert no-op and the
+    /// `beacons_deployed` game-over never fires.
     #[new]
-    #[pyo3(signature = (seed = 42, max_steps = 2000))]
-    fn new(seed: u64, max_steps: u32) -> PyResult<Self> {
-        let mut inner = EnvInner::new(seed, max_steps);
+    #[pyo3(signature = (seed = 42, max_steps = 2000, beacons_enabled = true))]
+    fn new(seed: u64, max_steps: u32, beacons_enabled: bool) -> PyResult<Self> {
+        let mut inner = EnvInner::new(seed, max_steps, beacons_enabled);
         // Initial warm-up so the first `obs` returned from `reset()`
         // is non-trivial.
         inner.warm_up();
@@ -267,11 +221,7 @@ impl RoverEnv {
         // firing a fake user "Randomize" — but we just write it
         // directly. The mineral regen system will catch up next
         // frame.
-        if let Some(mut terrain) = inner
-            .app
-            .world_mut()
-            .get_resource_mut::<TerrainState>()
-        {
+        if let Some(mut terrain) = inner.app.world_mut().get_resource_mut::<TerrainState>() {
             terrain.seed = seed;
         }
         // Drain a few more updates for the seed change to propagate
@@ -279,12 +229,10 @@ impl RoverEnv {
         for _ in 0..5 {
             inner.app.update();
         }
-        inner.last_total_reward = inner
-            .app
-            .world()
-            .resource::<RewardState>()
-            .total();
-        Ok(Self { inner: RefCell::new(inner) })
+        inner.last_total_reward = inner.app.world().resource::<RewardState>().total();
+        Ok(Self {
+            inner: RefCell::new(inner),
+        })
     }
 
     /// Reset the episode. Mirrors gym's `reset` contract: returns
@@ -299,11 +247,7 @@ impl RoverEnv {
 
         if let Some(s) = seed {
             inner.seed = s;
-            if let Some(mut terrain) = inner
-                .app
-                .world_mut()
-                .get_resource_mut::<TerrainState>()
-            {
+            if let Some(mut terrain) = inner.app.world_mut().get_resource_mut::<TerrainState>() {
                 terrain.seed = s;
             }
         }
@@ -317,11 +261,7 @@ impl RoverEnv {
         inner.warm_up();
 
         inner.step_count = 0;
-        inner.last_total_reward = inner
-            .app
-            .world()
-            .resource::<RewardState>()
-            .total();
+        inner.last_total_reward = inner.app.world().resource::<RewardState>().total();
 
         let obs = inner.observation();
         let info = make_info(&inner);
@@ -329,11 +269,7 @@ impl RoverEnv {
     }
 
     /// Advance one step. Returns `(obs, reward, terminated, truncated, info_json)`.
-    fn step(
-        &self,
-        _py: Python<'_>,
-        action: u32,
-    ) -> PyResult<(Vec<f32>, f32, bool, bool, String)> {
+    fn step(&self, _py: Python<'_>, action: u32) -> PyResult<(Vec<f32>, f32, bool, bool, String)> {
         let mut inner = self.inner.borrow_mut();
 
         inner.apply_action(action);
@@ -393,13 +329,22 @@ fn make_info(inner: &EnvInner) -> String {
             .unwrap_or(serde_json::Value::Null),
     );
     let reward = world.resource::<RewardState>();
-    map.insert("reward_total".into(), serde_json::Value::from(reward.total()));
-    map.insert("reward_distance".into(), serde_json::Value::from(reward.distance));
+    map.insert(
+        "reward_total".into(),
+        serde_json::Value::from(reward.total()),
+    );
+    map.insert(
+        "reward_distance".into(),
+        serde_json::Value::from(reward.distance),
+    );
     map.insert(
         "reward_mineral_integral".into(),
         serde_json::Value::from(reward.mineral_integral),
     );
-    map.insert("reward_beacon_bonus".into(), serde_json::Value::from(reward.beacon_bonus));
+    map.insert(
+        "reward_beacon_bonus".into(),
+        serde_json::Value::from(reward.beacon_bonus),
+    );
     map.insert(
         "beacons_remaining".into(),
         serde_json::Value::from(reward.beacons_remaining),

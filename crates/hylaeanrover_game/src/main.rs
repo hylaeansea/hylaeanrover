@@ -3,6 +3,10 @@
 //! `hylaeanrover_py` reuses `RoverCorePlugin` directly with
 //! `MinimalPlugins`.
 
+// Bevy ECS systems take many parameters by design — silence the
+// too-many-arguments lint crate-wide (also covers the autopilot module).
+#![allow(clippy::too_many_arguments)]
+
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::input::mouse::{MouseMotion, MouseWheel};
@@ -13,9 +17,12 @@ use bevy::transform::TransformSystems;
 use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin};
 use bevy_rapier3d::prelude::*;
 
-use hylaeanrover_core::terrain_controls::{cursor_over_terrain_panel, TerrainPanel};
+use hylaeanrover_core::terrain_controls::{TerrainPanel, cursor_over_terrain_panel};
 use hylaeanrover_core::ui::UiFont;
 use hylaeanrover_core::{ChassisEntity, RoverCorePlugin};
+
+mod autopilot;
+use autopilot::AutopilotPlugin;
 
 fn main() {
     App::new()
@@ -27,18 +34,20 @@ fn main() {
         .add_plugins(FrameTimeDiagnosticsPlugin::default())
         // Everything game-logic-related lives in the core crate.
         .add_plugins(RoverCorePlugin::default())
+        // Optional ONNX-policy autopilot (no-op unless `--policy` given).
+        .add_plugins(AutopilotPlugin)
         .init_resource::<CameraMode>()
         .add_systems(Startup, (setup, setup_fps_text))
-        .add_systems(Update, (update_fps_text, toggle_debug_render, toggle_camera_mode))
+        .add_systems(
+            Update,
+            (update_fps_text, toggle_debug_render, toggle_camera_mode),
+        )
         // Run follow-camera AFTER transform propagation so the chassis's
         // GlobalTransform is up to date — otherwise on the frame a freshly
         // respawned chassis appears, its GlobalTransform is still its
         // un-propagated local value (near origin) and the camera lerps a
         // visible jump toward (0,0,0) before snapping back the next frame.
-        .add_systems(
-            PostUpdate,
-            follow_camera.after(TransformSystems::Propagate),
-        )
+        .add_systems(PostUpdate, follow_camera.after(TransformSystems::Propagate))
         .run();
 }
 
@@ -87,20 +96,20 @@ fn setup_fps_text(mut commands: Commands, ui_font: Res<UiFont>) {
     ));
 }
 
-fn update_fps_text(
-    diagnostics: Res<DiagnosticsStore>,
-    mut query: Query<&mut Text, With<FpsText>>,
-) {
-    let Ok(mut text) = query.single_mut() else { return };
-    let Some(fps_diag) = diagnostics.get(&FrameTimeDiagnosticsPlugin::FPS) else { return };
-    let Some(fps) = fps_diag.smoothed() else { return };
+fn update_fps_text(diagnostics: Res<DiagnosticsStore>, mut query: Query<&mut Text, With<FpsText>>) {
+    let Ok(mut text) = query.single_mut() else {
+        return;
+    };
+    let Some(fps_diag) = diagnostics.get(&FrameTimeDiagnosticsPlugin::FPS) else {
+        return;
+    };
+    let Some(fps) = fps_diag.smoothed() else {
+        return;
+    };
     **text = format!("FPS: {:>5.1}", fps);
 }
 
-fn toggle_debug_render(
-    keyboard: Res<ButtonInput<KeyCode>>,
-    mut ctx: ResMut<DebugRenderContext>,
-) {
+fn toggle_debug_render(keyboard: Res<ButtonInput<KeyCode>>, mut ctx: ResMut<DebugRenderContext>) {
     if keyboard.just_pressed(KeyCode::F1) {
         ctx.enabled = !ctx.enabled;
     }
@@ -143,19 +152,22 @@ fn toggle_camera_mode(
     chassis_q: Query<&GlobalTransform, (Without<Camera3d>, With<RigidBody>)>,
     mut camera_q: Query<&mut PanOrbitCamera>,
 ) {
-    if !keyboard.just_pressed(KeyCode::KeyC) { return; }
+    if !keyboard.just_pressed(KeyCode::KeyC) {
+        return;
+    }
     *mode = match *mode {
         CameraMode::Orbit => CameraMode::FollowBehind,
         CameraMode::FollowBehind => CameraMode::Orbit,
     };
-    let Ok(mut pan_orbit) = camera_q.single_mut() else { return };
+    let Ok(mut pan_orbit) = camera_q.single_mut() else {
+        return;
+    };
     pan_orbit.enabled = matches!(*mode, CameraMode::Orbit);
-    if matches!(*mode, CameraMode::Orbit) {
-        if let Some(chassis_id) = chassis_res.0 {
-            if let Ok(gxf) = chassis_q.get(chassis_id) {
-                pan_orbit.target_focus = gxf.translation();
-            }
-        }
+    if matches!(*mode, CameraMode::Orbit)
+        && let Some(chassis_id) = chassis_res.0
+        && let Ok(gxf) = chassis_q.get(chassis_id)
+    {
+        pan_orbit.target_focus = gxf.translation();
     }
 }
 
@@ -176,11 +188,17 @@ fn follow_camera(
         return;
     }
 
-    let Some(chassis_id) = chassis_res.0 else { return };
-    let Ok(chassis_gxf) = chassis_q.get(chassis_id) else { return };
+    let Some(chassis_id) = chassis_res.0 else {
+        return;
+    };
+    let Ok(chassis_gxf) = chassis_q.get(chassis_id) else {
+        return;
+    };
     let chassis_pos = chassis_gxf.translation();
     let chassis_rot = chassis_gxf.rotation();
-    let Ok((mut cam_xform, mut follow)) = camera_q.single_mut() else { return };
+    let Ok((mut cam_xform, mut follow)) = camera_q.single_mut() else {
+        return;
+    };
 
     let over_ui = cursor_over_terrain_panel(&panel_q);
 

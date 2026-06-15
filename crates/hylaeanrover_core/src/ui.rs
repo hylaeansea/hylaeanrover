@@ -21,7 +21,11 @@ pub struct UiFont {
 
 impl UiFont {
     pub fn text(&self, size: f32) -> TextFont {
-        TextFont { font: self.regular.clone(), font_size: size, ..default() }
+        TextFont {
+            font: self.regular.clone(),
+            font_size: size,
+            ..default()
+        }
     }
 }
 

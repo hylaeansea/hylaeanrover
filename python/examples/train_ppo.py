@@ -31,9 +31,10 @@ def main() -> None:
     # Inspect a fresh observation.
     obs, info = env.reset(seed=42)
     print(f"\nFresh obs shape={obs.shape}, dtype={obs.dtype}")
-    print(f"  imu (first 7):  {np.round(obs[:7], 3)}")
-    print(f"  lidar (next 8): {np.round(obs[7:15], 1)}")
-    print(f"  reward + beacon (last 6): {np.round(obs[-6:], 3)}")
+    print(f"  imu (first 7):      {np.round(obs[:7], 3)}")
+    print(f"  lidar (next 8):     {np.round(obs[7:15], 1)}")
+    print(f"  minerals (35:41):   {np.round(obs[35:41], 3)}")
+    print(f"  beacons_remaining:  {obs[41]}")
     print(f"  info: {info}")
 
     # Random rollout sanity check — confirms step() returns sensible

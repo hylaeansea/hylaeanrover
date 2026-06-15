@@ -1,7 +1,7 @@
 use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::{Rng, SeedableRng, rngs::StdRng};
 
 /// Procedurally generated lunar terrain heightmap.
 ///
@@ -44,7 +44,12 @@ impl Default for LunarTerrainConfig {
 
 impl LunarTerrain {
     pub fn generate(cfg: LunarTerrainConfig) -> Self {
-        let LunarTerrainConfig { seed, size, resolution, crater_count } = cfg;
+        let LunarTerrainConfig {
+            seed,
+            size,
+            resolution,
+            crater_count,
+        } = cfg;
         let n = resolution.max(2);
         let mut rng = StdRng::seed_from_u64(seed);
         let mut heights = vec![0.0_f32; n * n];
@@ -133,7 +138,11 @@ impl LunarTerrain {
             arena_crater_depth,
         );
 
-        Self { size, resolution: n, heights }
+        Self {
+            size,
+            resolution: n,
+            heights,
+        }
     }
 
     #[allow(dead_code)]
@@ -225,7 +234,6 @@ impl LunarTerrain {
     }
 }
 
-
 fn stamp_crater(
     heights: &mut [f32],
     n: usize,
@@ -242,20 +250,19 @@ fn stamp_crater(
     for z in 0..n {
         let wz = (z as f32 / (n - 1) as f32) * 2.0 * size - size;
         let dz = wz - cz;
-        if dz.abs() > influence { continue; }
+        if dz.abs() > influence {
+            continue;
+        }
         for x in 0..n {
             let wx = (x as f32 / (n - 1) as f32) * 2.0 * size - size;
             let dx = wx - cx;
             let dist = (dx * dx + dz * dz).sqrt();
             let d = dist / radius;
-            if d > 1.8 { continue; }
-            let bowl = if d < 1.0 {
-                -depth * (1.0 - d * d)
-            } else {
-                0.0
-            };
-            let rim = rim_height
-                * (-((d - 1.0).powi(2)) / (rim_sigma * rim_sigma)).exp();
+            if d > 1.8 {
+                continue;
+            }
+            let bowl = if d < 1.0 { -depth * (1.0 - d * d) } else { 0.0 };
+            let rim = rim_height * (-((d - 1.0).powi(2)) / (rim_sigma * rim_sigma)).exp();
             heights[z * n + x] += bowl + rim;
         }
     }
