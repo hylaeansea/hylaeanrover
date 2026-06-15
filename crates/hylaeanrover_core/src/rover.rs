@@ -107,13 +107,17 @@ pub struct RoverPlugin {
 
 impl Default for RoverPlugin {
     fn default() -> Self {
-        Self { spawn_mode: RoverSpawnMode::Gltf }
+        Self {
+            spawn_mode: RoverSpawnMode::Gltf,
+        }
     }
 }
 
 impl RoverPlugin {
     pub fn headless() -> Self {
-        Self { spawn_mode: RoverSpawnMode::Primitives }
+        Self {
+            spawn_mode: RoverSpawnMode::Primitives,
+        }
     }
 }
 
@@ -177,20 +181,12 @@ fn spawn_rover_primitives(commands: &mut Commands, root_xform: Transform) {
     // Chassis sits at the root entity's local origin in the glTF
     // hierarchy, so we place its local Transform at the origin and let
     // the root's transform propagate.
-    commands.spawn((
-        Name::new("chassis"),
-        Transform::IDENTITY,
-        ChildOf(root),
-    ));
+    commands.spawn((Name::new("chassis"), Transform::IDENTITY, ChildOf(root)));
     for (name, _offset) in WHEEL_OFFSETS {
         // Wheels sit at the chassis's local origin pre-physics — the
         // joint setup in `attach_joints` translates them to their
         // suspension anchor positions before the first physics step.
-        commands.spawn((
-            Name::new(*name),
-            Transform::IDENTITY,
-            ChildOf(root),
-        ));
+        commands.spawn((Name::new(*name), Transform::IDENTITY, ChildOf(root)));
     }
 }
 
@@ -207,10 +203,11 @@ fn respawn_rover(
     cfg: Res<SpawnConfig>,
 ) {
     let Some(keyboard) = keyboard else { return };
-    if !keyboard.just_pressed(KeyCode::KeyR) { return; }
+    if !keyboard.just_pressed(KeyCode::KeyR) {
+        return;
+    }
 
-    let to_origin = keyboard.pressed(KeyCode::ShiftLeft)
-        || keyboard.pressed(KeyCode::ShiftRight);
+    let to_origin = keyboard.pressed(KeyCode::ShiftLeft) || keyboard.pressed(KeyCode::ShiftRight);
 
     let pad_y = terrain
         .as_ref()
@@ -320,8 +317,12 @@ fn attach_joints(
     chassis_res: Res<ChassisEntity>,
     xforms: Query<&GlobalTransform>,
 ) {
-    let Some(chassis_id) = chassis_res.0 else { return };
-    let Ok(chassis_xform) = xforms.get(chassis_id) else { return };
+    let Some(chassis_id) = chassis_res.0 else {
+        return;
+    };
+    let Ok(chassis_xform) = xforms.get(chassis_id) else {
+        return;
+    };
     let chassis_pos = chassis_xform.translation();
     let chassis_rot = chassis_xform.rotation();
 
@@ -381,9 +382,9 @@ fn attach_joints(
             .local_anchor2(Vec3::ZERO)
             .motor_velocity(0.0, 50.0);
 
-        commands.entity(wheel_entity).insert(
-            ImpulseJoint::new(knuckle, spin_joint),
-        );
+        commands
+            .entity(wheel_entity)
+            .insert(ImpulseJoint::new(knuckle, spin_joint));
     }
 }
 
@@ -408,6 +409,7 @@ pub struct RoverAction {
 fn drive(
     keyboard: Option<Res<ButtonInput<KeyCode>>>,
     action: Option<Res<RoverAction>>,
+    autopilot: Option<Res<crate::AutopilotActive>>,
     mut wheel_joints: Query<&mut ImpulseJoint, (With<Wheel>, Without<SteeringKnuckle>)>,
     mut knuckle_joints: Query<(&SteeringKnuckle, &mut ImpulseJoint), Without<Wheel>>,
     power: Res<PowerState>,
@@ -418,7 +420,14 @@ fn drive(
     // resource is present. The keyboard path is what the game binary
     // uses; the env populates RoverAction each step. In headless mode
     // (no InputPlugin) keyboard is None and we drive from action only.
+    //
+    // When the in-game autopilot is active we always honour the action —
+    // even a zero throttle/steer "coast" command — so the policy isn't
+    // overridden by the (absent) keyboard. Otherwise a zero action falls
+    // through to keyboard, matching the original game behaviour.
+    let autopilot_active = autopilot.map(|a| a.0).unwrap_or(false);
     let (throttle_in, steer_in) = match (&action, &keyboard) {
+        (Some(a), _) if autopilot_active => (a.throttle, a.steering),
         (Some(a), _) if a.throttle != 0.0 || a.steering != 0.0 => (a.throttle, a.steering),
         (_, Some(kb)) => {
             let t = if kb.pressed(KeyCode::KeyW) {
@@ -440,7 +449,11 @@ fn drive(
         _ => (0.0, 0.0),
     };
 
-    let throttle = if !power.has_power() { 0.0 } else { throttle_in * 10.0 };
+    let throttle = if !power.has_power() {
+        0.0
+    } else {
+        throttle_in * 10.0
+    };
 
     for mut joint in wheel_joints.iter_mut() {
         if let TypedJoint::RevoluteJoint(ref mut revolute) = joint.data {

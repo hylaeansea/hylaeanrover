@@ -14,7 +14,7 @@ use crate::power_cubes::RelaunchEvent;
 use crate::reward::RewardState;
 use crate::rover::{RoverAction, SpawnConfig};
 use crate::terrain_controls::TerrainState;
-use crate::ChassisEntity;
+use crate::{BeaconsEnabled, ChassisEntity};
 
 /// Where behind the chassis (chassis-local +X) the beacon spawns, in
 /// meters. Far enough to clear the back wheels.
@@ -75,7 +75,9 @@ fn load_beacon_asset(
     if spawn_cfg.map(|c| c.is_headless()).unwrap_or(false) {
         return;
     }
-    let Some(asset_server) = asset_server else { return };
+    let Some(asset_server) = asset_server else {
+        return;
+    };
     assets.scene = Some(asset_server.load("beacon_1.glb#Scene0"));
 }
 
@@ -89,7 +91,18 @@ fn place_beacon_on_input(
     assets: Res<BeaconAssets>,
     maps: Res<MineralMaps>,
     mut reward: ResMut<RewardState>,
+    beacons_enabled: Option<Res<BeaconsEnabled>>,
 ) {
+    // Beacons disabled (RL locomotion / mineral curriculum stages): drop
+    // requests are inert, but still edge-consume the action flag so a
+    // held-down `drop_beacon` doesn't accumulate.
+    if !beacons_enabled.map(|b| b.0).unwrap_or(true) {
+        if let Some(mut a) = action {
+            a.drop_beacon = false;
+        }
+        return;
+    }
+
     // Two trigger sources: B key (human play) and RoverAction.drop_beacon
     // (RL env). The action flag is consumed (reset to false) so it acts
     // edge-triggered like the key.
@@ -97,10 +110,7 @@ fn place_beacon_on_input(
         .as_ref()
         .map(|k| k.just_pressed(KeyCode::KeyB))
         .unwrap_or(false);
-    let action_requested = action
-        .as_ref()
-        .map(|a| a.drop_beacon)
-        .unwrap_or(false);
+    let action_requested = action.as_ref().map(|a| a.drop_beacon).unwrap_or(false);
     if !key_pressed && !action_requested {
         return;
     }
@@ -109,8 +119,12 @@ fn place_beacon_on_input(
         a.drop_beacon = false;
     }
 
-    let Some(chassis_id) = chassis_res.0 else { return };
-    let Ok(chassis_gxf) = chassis_q.get(chassis_id) else { return };
+    let Some(chassis_id) = chassis_res.0 else {
+        return;
+    };
+    let Ok(chassis_gxf) = chassis_q.get(chassis_id) else {
+        return;
+    };
 
     // Project the chassis forward vector onto the world XZ plane to get
     // a pure-yaw rotation; we want the beacon upright (Y world up) but

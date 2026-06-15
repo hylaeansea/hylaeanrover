@@ -11,7 +11,7 @@ version = "0.1.0"
 edition = "2024"
 
 [workspace.dependencies]
-bevy = "0.18.1"
+bevy = { version = "0.18.1", features = ["jpeg"] }
 bevy_rapier3d = "0.33"
 bevy_panorbit_camera = "0.34"
 rand = "0.8"

@@ -18,8 +18,8 @@ use crate::game_state::{GameState, GameStatus};
 use crate::ui::{LeftSidebar, LeftSidebarSet, UiFont};
 use rand::Rng;
 
-use crate::terrain_controls::TerrainState;
 use crate::ChassisEntity;
+use crate::terrain_controls::TerrainState;
 
 // ---- Tunable constants ----------------------------------------------------
 const SPAWN_LAMBDA: f32 = 0.05;
@@ -216,10 +216,7 @@ impl Plugin for PowerCubesPlugin {
 
 // ---- Asset / UI setup -----------------------------------------------------
 
-fn setup_assets(
-    mut assets: ResMut<PowerCubeAssets>,
-    mut meshes: ResMut<Assets<Mesh>>,
-) {
+fn setup_assets(mut assets: ResMut<PowerCubeAssets>, mut meshes: ResMut<Assets<Mesh>>) {
     assets.mesh = meshes.add(Cuboid::new(
         CUBE_HALF_EXTENT * 2.0,
         CUBE_HALF_EXTENT * 2.0,
@@ -232,7 +229,9 @@ fn setup_power_ui(
     ui_font: Option<Res<UiFont>>,
     sidebar: Option<Res<LeftSidebar>>,
 ) {
-    let (Some(ui_font), Some(sidebar)) = (ui_font, sidebar) else { return };
+    let (Some(ui_font), Some(sidebar)) = (ui_font, sidebar) else {
+        return;
+    };
     commands
         .spawn((
             Node {
@@ -320,7 +319,9 @@ fn spawn_power_cubes(
     // so we can spawn cubes a small fixed height *above the local
     // terrain* rather than at a world-space y. Otherwise on the new big
     // crater map they fall ~300 m and hit at terminal velocity.
-    let Some(terrain) = terrain.as_ref() else { return };
+    let Some(terrain) = terrain.as_ref() else {
+        return;
+    };
     let x: f32 = rng.gen_range(-SPAWN_EXTENT..SPAWN_EXTENT);
     let z: f32 = rng.gen_range(-SPAWN_EXTENT..SPAWN_EXTENT);
     let local_y = terrain.height_at(x, z);
@@ -379,8 +380,8 @@ fn consume_power_from_motion(
     // (no input, or out of power) but the rover is still moving, we
     // treat the motion as regenerative — sliding wheels can charge the
     // battery at REGEN_EFFICIENCY of the equivalent drive cost.
-    let throttling = power.has_power()
-        && (keyboard.pressed(KeyCode::KeyW) || keyboard.pressed(KeyCode::KeyS));
+    let throttling =
+        power.has_power() && (keyboard.pressed(KeyCode::KeyW) || keyboard.pressed(KeyCode::KeyS));
 
     if let Some(last) = power.last_chassis_pos {
         let dist = (pos - last).length();
@@ -395,8 +396,7 @@ fn consume_power_from_motion(
                 // sliver of regen → throttle works for one frame → drain
                 // → 0 → coast → loop. The rover never actually comes to
                 // rest, so the at-rest game-over trigger never fires.
-                power.current =
-                    (power.current + delta_wh * REGEN_EFFICIENCY).min(power.max);
+                power.current = (power.current + delta_wh * REGEN_EFFICIENCY).min(power.max);
             }
         }
     }
@@ -415,8 +415,12 @@ fn detect_cube_pickup(
     >,
     materials: Res<Assets<StandardMaterial>>,
 ) {
-    let Some(chassis_id) = chassis_res.0 else { return };
-    let Ok(chassis_gxf) = xforms.get(chassis_id) else { return };
+    let Some(chassis_id) = chassis_res.0 else {
+        return;
+    };
+    let Ok(chassis_gxf) = xforms.get(chassis_id) else {
+        return;
+    };
     let chassis_pos = chassis_gxf.translation();
     let range_sq = PICKUP_RANGE * PICKUP_RANGE;
 
@@ -505,7 +509,11 @@ fn setup_tutorial_ui(mut commands: Commands, ui_font: Option<Res<UiFont>>) {
                 ..default()
             },
             BackgroundColor(with_panel_alpha(PANEL_BG, 0.0)),
-            Outline::new(Val::Px(1.0), Val::Px(0.0), with_panel_alpha(PANEL_EDGE, 0.0)),
+            Outline::new(
+                Val::Px(1.0),
+                Val::Px(0.0),
+                with_panel_alpha(PANEL_EDGE, 0.0),
+            ),
             // Hover detection so the banner stays in once the cursor moves
             // from the POWER panel onto the banner itself.
             RelativeCursorPosition::default(),
@@ -548,8 +556,7 @@ fn update_tutorial_fade(
             .map(|p| (0.0..=1.0).contains(&p.x) && (0.0..=1.0).contains(&p.y))
             .unwrap_or(false)
     };
-    let hovering =
-        inside(panel_q.single().ok()) || inside(banner_q.single().ok());
+    let hovering = inside(panel_q.single().ok()) || inside(banner_q.single().ok());
 
     let target = if hovering && power.pickups_count == 0 {
         1.0
@@ -594,7 +601,11 @@ fn setup_controls_hint(mut commands: Commands, ui_font: Option<Res<UiFont>>) {
                 ..default()
             },
             BackgroundColor(with_panel_alpha(PANEL_BG, 0.0)),
-            Outline::new(Val::Px(1.0), Val::Px(0.0), with_panel_alpha(PANEL_EDGE, 0.0)),
+            Outline::new(
+                Val::Px(1.0),
+                Val::Px(0.0),
+                with_panel_alpha(PANEL_EDGE, 0.0),
+            ),
             ControlsHint { elapsed: 0.0 },
         ))
         .with_children(|hint| {
@@ -796,21 +807,21 @@ fn update_game_over_visibility(
     mut panel_q: Query<&mut Node, With<GameOverPanel>>,
     mut button_bg_q: Query<&mut BackgroundColor, With<RelaunchButton>>,
     button_int_q: Query<&Interaction, With<RelaunchButton>>,
-    mut headline_q: Query<
-        &mut Text,
-        (With<GameOverHeadlineText>, Without<GameOverSubtitleText>),
-    >,
-    mut subtitle_q: Query<
-        &mut Text,
-        (With<GameOverSubtitleText>, Without<GameOverHeadlineText>),
-    >,
+    mut headline_q: Query<&mut Text, (With<GameOverHeadlineText>, Without<GameOverSubtitleText>)>,
+    mut subtitle_q: Query<&mut Text, (With<GameOverSubtitleText>, Without<GameOverHeadlineText>)>,
 ) {
-    let Ok(mut node) = panel_q.single_mut() else { return };
+    let Ok(mut node) = panel_q.single_mut() else {
+        return;
+    };
     let reason = match state.status {
         GameStatus::Playing => None,
         GameStatus::GameOver(r) => Some(r),
     };
-    let target = if reason.is_some() { Display::Flex } else { Display::None };
+    let target = if reason.is_some() {
+        Display::Flex
+    } else {
+        Display::None
+    };
     if node.display != target {
         node.display = target;
     }

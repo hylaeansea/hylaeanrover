@@ -9,3 +9,7 @@
 # Build artifacts from `maturin develop`
 **/*.so
 **/*.pyd
+
+# RL training outputs (models, vecnorm stats, tensorboard logs)
+runs/
+**/runs/

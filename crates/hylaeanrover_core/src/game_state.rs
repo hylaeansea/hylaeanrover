@@ -23,7 +23,7 @@ use bevy_rapier3d::prelude::Velocity;
 
 use crate::power_cubes::{PowerState, RelaunchEvent};
 use crate::reward::RewardState;
-use crate::ChassisEntity;
+use crate::{BeaconsEnabled, ChassisEntity};
 
 // ---- Tuning constants ---------------------------------------------------
 
@@ -101,6 +101,7 @@ fn update_game_state(
     reward: Res<RewardState>,
     time: Res<Time>,
     mut state: ResMut<GameState>,
+    beacons_enabled: Option<Res<BeaconsEnabled>>,
 ) {
     // Once we've fired a game-over, freeze — the at-rest timer no longer
     // matters and we don't want to silently switch reasons mid-modal.
@@ -110,8 +111,10 @@ fn update_game_state(
 
     // Immediate trigger: the player just placed the final beacon. No
     // at-rest gate — placing a beacon is a deliberate, terminal action,
-    // and waiting 5 s after the click would feel laggy.
-    if reward.beacons_remaining == 0 {
+    // and waiting 5 s after the click would feel laggy. Skipped entirely
+    // when beacons are disabled (RL locomotion / mineral stages) so the
+    // episode only ends on flip / out-of-power / max-steps.
+    if beacons_enabled.map(|b| b.0).unwrap_or(true) && reward.beacons_remaining == 0 {
         state.status = GameStatus::GameOver(GameOverReason::BeaconsDeployed);
         return;
     }
@@ -160,10 +163,7 @@ fn update_game_state(
     }
 }
 
-fn reset_on_relaunch(
-    mut events: MessageReader<RelaunchEvent>,
-    mut state: ResMut<GameState>,
-) {
+fn reset_on_relaunch(mut events: MessageReader<RelaunchEvent>, mut state: ResMut<GameState>) {
     if events.read().count() == 0 {
         return;
     }

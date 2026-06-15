@@ -126,8 +126,12 @@ impl Plugin for TerrainControlsPlugin {
 pub fn cursor_over_terrain_panel(
     panel_q: &Query<&RelativeCursorPosition, With<TerrainPanel>>,
 ) -> bool {
-    let Ok(cursor) = panel_q.single() else { return false };
-    let Some(p) = cursor.normalized else { return false };
+    let Ok(cursor) = panel_q.single() else {
+        return false;
+    };
+    let Some(p) = cursor.normalized else {
+        return false;
+    };
     (0.0..=1.0).contains(&p.x) && (0.0..=1.0).contains(&p.y)
 }
 
@@ -250,10 +254,10 @@ fn rebuild_terrain(
 
     // Mutate the existing Mesh asset in place — no asset realloc, no new
     // Handle, GPU upload is a single dirty-data path.
-    if let Some(handle) = state.mesh_handle.as_ref() {
-        if let Some(mesh) = meshes.get_mut(handle) {
-            *mesh = new_mesh;
-        }
+    if let Some(handle) = state.mesh_handle.as_ref()
+        && let Some(mesh) = meshes.get_mut(handle)
+    {
+        *mesh = new_mesh;
     }
 
     // Swap the Collider component on the existing entity rather than
@@ -365,31 +369,30 @@ fn setup_ui(mut commands: Commands, ui_font: Option<Res<UiFont>>) {
             spawn_button(panel, &ui_font, "Randomize seed", RandomizeSeedButton);
 
             // Footer info
-            panel.spawn((
-                Node {
+            panel
+                .spawn((Node {
                     margin: UiRect::top(Val::Auto),
                     flex_direction: FlexDirection::Column,
                     row_gap: Val::Px(4.0),
                     ..default()
-                },
-            ))
-            .with_children(|footer| {
-                footer.spawn((
-                    Node {
-                        height: Val::Px(1.0),
-                        width: Val::Percent(100.0),
-                        margin: UiRect::bottom(Val::Px(6.0)),
-                        ..default()
-                    },
-                    BackgroundColor(PANEL_EDGE),
-                ));
-                footer.spawn((
-                    Text::new("seed: --"),
-                    ui_font.text(11.0),
-                    TextColor(TEXT_DIM),
-                    SeedValueText,
-                ));
-            });
+                },))
+                .with_children(|footer| {
+                    footer.spawn((
+                        Node {
+                            height: Val::Px(1.0),
+                            width: Val::Percent(100.0),
+                            margin: UiRect::bottom(Val::Px(6.0)),
+                            ..default()
+                        },
+                        BackgroundColor(PANEL_EDGE),
+                    ));
+                    footer.spawn((
+                        Text::new("seed: --"),
+                        ui_font.text(11.0),
+                        TextColor(TEXT_DIM),
+                        SeedValueText,
+                    ));
+                });
         });
 }
 
@@ -413,16 +416,17 @@ fn spawn_button<'a, M: Component>(
         marker,
     ));
     ec.with_children(|btn| {
-        btn.spawn((
-            Text::new(label),
-            ui_font.text(12.0),
-            TextColor(TEXT_MAIN),
-        ));
+        btn.spawn((Text::new(label), ui_font.text(12.0), TextColor(TEXT_MAIN)));
     });
     ec
 }
 
-fn spawn_scale_button(parent: &mut ChildSpawnerCommands, ui_font: &UiFont, label: &str, kind: ScaleButton) {
+fn spawn_scale_button(
+    parent: &mut ChildSpawnerCommands,
+    ui_font: &UiFont,
+    label: &str,
+    kind: ScaleButton,
+) {
     parent
         .spawn((
             Button,
@@ -438,11 +442,7 @@ fn spawn_scale_button(parent: &mut ChildSpawnerCommands, ui_font: &UiFont, label
             kind,
         ))
         .with_children(|btn| {
-            btn.spawn((
-                Text::new(label),
-                ui_font.text(13.0),
-                TextColor(TEXT_MAIN),
-            ));
+            btn.spawn((Text::new(label), ui_font.text(13.0), TextColor(TEXT_MAIN)));
         });
 }
 

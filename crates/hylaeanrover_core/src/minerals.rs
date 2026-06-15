@@ -17,10 +17,10 @@
 //! sample analyses (highland vs. mare composition + polar volatiles).
 
 use bevy::prelude::*;
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::{Rng, SeedableRng, rngs::StdRng};
 
-use crate::ui::{LeftSidebar, LeftSidebarSet, UiFont};
 use crate::ChassisEntity;
+use crate::ui::{LeftSidebar, LeftSidebarSet, UiFont};
 
 // ----- Element catalogue --------------------------------------------------
 
@@ -67,22 +67,30 @@ struct ElementSpec {
 const ELEMENTS: &[ElementSpec] = &[
     ElementSpec {
         // Si: ~20 wt% almost everywhere.
-        name: "Si", base: 300_000.0, range: 20_000.0,
+        name: "Si",
+        base: 300_000.0,
+        range: 20_000.0,
         mode: DepositMode::Noise,
     },
     ElementSpec {
         // Al: ~7% in mare, ~14% in highlands.
-        name: "Al", base: 150_000.0, range: 60_000.0,
+        name: "Al",
+        base: 150_000.0,
+        range: 60_000.0,
         mode: DepositMode::Noise,
     },
     ElementSpec {
         // Fe: ~12% in mare, ~4% in highlands.
-        name: "Fe", base: 110_000.0, range: 70_000.0,
+        name: "Fe",
+        base: 110_000.0,
+        range: 70_000.0,
         mode: DepositMode::Noise,
     },
     ElementSpec {
         // Ti: 0.4–4.5% — ilmenite hotspots.
-        name: "Ti", base: 8_000.0, range: 60_000.0,
+        name: "Ti",
+        base: 8_000.0,
+        range: 60_000.0,
         mode: DepositMode::GaussianMixture {
             count: 28,
             sigma_min: 40.0,
@@ -93,7 +101,9 @@ const ELEMENTS: &[ElementSpec] = &[
     },
     ElementSpec {
         // H2O: trace globally, up to ~5 wt% in PSR-like patches.
-        name: "H2O", base: 200.0, range: 50_000.0,
+        name: "H2O",
+        base: 200.0,
+        range: 50_000.0,
         mode: DepositMode::GaussianMixture {
             count: 14,
             sigma_min: 30.0,
@@ -105,7 +115,9 @@ const ELEMENTS: &[ElementSpec] = &[
     ElementSpec {
         // He-3: tiny trace baseline, slightly enriched in a handful of
         // mature mare-like patches.
-        name: "He-3", base: 0.0030, range: 0.020,
+        name: "He-3",
+        base: 0.0030,
+        range: 0.020,
         mode: DepositMode::GaussianMixture {
             count: 9,
             sigma_min: 25.0,
@@ -193,9 +205,7 @@ impl MineralMaps {
         let surface: Vec<Vec<f32>> = ELEMENTS
             .iter()
             .map(|e| match e.mode {
-                DepositMode::Noise => {
-                    layered_value_noise(&mut rng, n, e.base, e.range)
-                }
+                DepositMode::Noise => layered_value_noise(&mut rng, n, e.base, e.range),
                 DepositMode::GaussianMixture {
                     count,
                     sigma_min,
@@ -203,8 +213,8 @@ impl MineralMaps {
                     height_min,
                     height_max,
                 } => gaussian_mixture_field(
-                    &mut rng, n, size, e.base, e.range, count, sigma_min,
-                    sigma_max, height_min, height_max,
+                    &mut rng, n, size, e.base, e.range, count, sigma_min, sigma_max, height_min,
+                    height_max,
                 ),
             })
             .collect();
@@ -252,7 +262,12 @@ impl MineralMaps {
             })
             .collect();
 
-        Self { size, resolution: n, surface, subsurface }
+        Self {
+            size,
+            resolution: n,
+            surface,
+            subsurface,
+        }
     }
 
     pub fn surface_at(&self, element: usize, x: f32, z: f32) -> f32 {
@@ -380,11 +395,7 @@ fn regenerate_on_seed_change(
         *last_seed = Some(current);
         return;
     }
-    commands.insert_resource(MineralMaps::generate(
-        current,
-        MAP_SIZE,
-        MAP_RESOLUTION,
-    ));
+    commands.insert_resource(MineralMaps::generate(current, MAP_SIZE, MAP_RESOLUTION));
     *last_seed = Some(current);
 }
 
@@ -395,7 +406,9 @@ fn setup_mineral_ui(
     ui_font: Option<Res<UiFont>>,
     sidebar: Option<Res<LeftSidebar>>,
 ) {
-    let (Some(ui_font), Some(sidebar)) = (ui_font, sidebar) else { return };
+    let (Some(ui_font), Some(sidebar)) = (ui_font, sidebar) else {
+        return;
+    };
     commands
         .spawn((
             Node {
@@ -441,11 +454,7 @@ fn setup_mineral_ui(
                         ElementRowButton(i),
                     ))
                     .with_children(|row| {
-                        row.spawn((
-                            Text::new(e.name),
-                            ui_font.text(12.0),
-                            TextColor(TEXT_MAIN),
-                        ));
+                        row.spawn((Text::new(e.name), ui_font.text(12.0), TextColor(TEXT_MAIN)));
                         row.spawn((
                             Text::new("-- g/m³"),
                             ui_font.text(12.0),
@@ -510,16 +519,12 @@ fn format_with_commas(v: f32) -> String {
     }
     let bytes = s.as_bytes();
     for (i, &c) in bytes.iter().enumerate() {
-        if i > 0 && (bytes.len() - i) % 3 == 0 {
+        if i > 0 && (bytes.len() - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(c as char);
     }
-    if is_neg {
-        format!("-{}", out)
-    } else {
-        out
-    }
+    if is_neg { format!("-{}", out) } else { out }
 }
 
 // ----- Noise / lookup helpers ---------------------------------------------
@@ -560,13 +565,7 @@ fn lookup(grid: &[f32], n: usize, size: f32, x: f32, z: f32) -> f32 {
 fn layered_value_noise(rng: &mut StdRng, n: usize, base: f32, range: f32) -> Vec<f32> {
     let mut grid = vec![0.0f32; n * n];
     // (grid_size, amplitude). Peak frequency at grid_size 64.
-    let layers: [(usize, f32); 5] = [
-        (16, 0.40),
-        (32, 0.70),
-        (64, 1.00),
-        (128, 0.55),
-        (256, 0.25),
-    ];
+    let layers: [(usize, f32); 5] = [(16, 0.40), (32, 0.70), (64, 1.00), (128, 0.55), (256, 0.25)];
     // Sum of amps = 2.90, but normalise by ~60% of that so peaks can
     // briefly hit ≈ 1.7 — concentration spikes become noticeably
     // bigger without changing the per-element base / range tuning.
@@ -727,14 +726,14 @@ fn sync_row_highlight(
         };
 
         // Label (first child, the name) colour brightens when active.
-        if let Some(first) = children.iter().next() {
-            if let Ok(mut tc) = text_q.get_mut(first) {
-                tc.0 = if is_active {
-                    Color::srgba(r, g, b, 1.0)
-                } else {
-                    Color::srgba(0.85, 0.95, 1.00, 1.0) // TEXT_MAIN
-                };
-            }
+        if let Some(first) = children.iter().next()
+            && let Ok(mut tc) = text_q.get_mut(first)
+        {
+            tc.0 = if is_active {
+                Color::srgba(r, g, b, 1.0)
+            } else {
+                Color::srgba(0.85, 0.95, 1.00, 1.0) // TEXT_MAIN
+            };
         }
     }
 }
@@ -772,7 +771,15 @@ fn apply_mineral_overlay(
     };
 
     let colors: Vec<[f32; 4]> = match overlay.element {
-        None => vec![[DEFAULT_TERRAIN_COLOR[0], DEFAULT_TERRAIN_COLOR[1], DEFAULT_TERRAIN_COLOR[2], 1.0]; positions.len()],
+        None => vec![
+            [
+                DEFAULT_TERRAIN_COLOR[0],
+                DEFAULT_TERRAIN_COLOR[1],
+                DEFAULT_TERRAIN_COLOR[2],
+                1.0
+            ];
+            positions.len()
+        ],
         Some(i) => {
             let spec = &ELEMENTS[i];
             // Anchor the colour ramp's "grey" and "full colour" ends to

@@ -26,10 +26,10 @@
 
 use bevy::prelude::*;
 
-use crate::minerals::{element_catalog, MineralMaps};
+use crate::ChassisEntity;
+use crate::minerals::{MineralMaps, element_catalog};
 use crate::power_cubes::RelaunchEvent;
 use crate::ui::UiFont;
-use crate::ChassisEntity;
 
 // ---- Tuning constants ----------------------------------------------------
 
@@ -101,9 +101,11 @@ impl RewardState {
             .iter()
             .zip(element_catalog())
             .zip(SCARCITY_WEIGHTS.iter())
-            .map(|(((_name, sub), (_n, base)), w)| {
-                if base > 0.0 { w * (sub / base) } else { 0.0 }
-            })
+            .map(
+                |(((_name, sub), (_n, base)), w)| {
+                    if base > 0.0 { w * (sub / base) } else { 0.0 }
+                },
+            )
             .sum();
         let bonus = BEACON_MULTIPLIER * weighted;
         self.beacon_bonus += bonus;
@@ -149,7 +151,9 @@ fn accumulate_path_integral(
         reward.last_chassis_pos = None;
         return;
     };
-    let Ok(gxf) = chassis_q.get(chassis_id) else { return };
+    let Ok(gxf) = chassis_q.get(chassis_id) else {
+        return;
+    };
     let pos = gxf.translation();
 
     let ds = match reward.last_chassis_pos {
@@ -188,10 +192,7 @@ fn accumulate_path_integral(
 
 // ---- Reset on relaunch ---------------------------------------------------
 
-fn reset_on_relaunch(
-    mut events: MessageReader<RelaunchEvent>,
-    mut reward: ResMut<RewardState>,
-) {
+fn reset_on_relaunch(mut events: MessageReader<RelaunchEvent>, mut reward: ResMut<RewardState>) {
     if events.read().count() == 0 {
         return;
     }
@@ -241,12 +242,17 @@ fn setup_reward_ui(mut commands: Commands, ui_font: Option<Res<UiFont>>) {
             Outline::new(Val::Px(1.0), Val::Px(0.0), BAR_EDGE),
         ))
         .with_children(|bar| {
-            reward_cell(bar, &ui_font, "BEACONS",  RewardCell::Beacons,
-                        format!("{}/{}", BEACON_BUDGET, BEACON_BUDGET));
+            reward_cell(
+                bar,
+                &ui_font,
+                "BEACONS",
+                RewardCell::Beacons,
+                format!("{}/{}", BEACON_BUDGET, BEACON_BUDGET),
+            );
             reward_cell(bar, &ui_font, "DISTANCE", RewardCell::Distance, "0".into());
-            reward_cell(bar, &ui_font, "MINERAL",  RewardCell::Mineral, "0".into());
-            reward_cell(bar, &ui_font, "BEACON",   RewardCell::BeaconBonus, "0".into());
-            reward_cell(bar, &ui_font, "TOTAL",    RewardCell::Total, "0".into());
+            reward_cell(bar, &ui_font, "MINERAL", RewardCell::Mineral, "0".into());
+            reward_cell(bar, &ui_font, "BEACON", RewardCell::BeaconBonus, "0".into());
+            reward_cell(bar, &ui_font, "TOTAL", RewardCell::Total, "0".into());
         });
 }
 
@@ -264,11 +270,7 @@ fn reward_cell(
         ..default()
     })
     .with_children(|cell| {
-        cell.spawn((
-            Text::new(label),
-            ui_font.text(10.0),
-            TextColor(TEXT_DIM),
-        ));
+        cell.spawn((Text::new(label), ui_font.text(10.0), TextColor(TEXT_DIM)));
         cell.spawn((
             Text::new(initial),
             ui_font.text(13.0),
@@ -278,17 +280,14 @@ fn reward_cell(
     });
 }
 
-fn sync_reward_ui(
-    reward: Res<RewardState>,
-    mut q: Query<(&RewardCell, &mut Text)>,
-) {
+fn sync_reward_ui(reward: Res<RewardState>, mut q: Query<(&RewardCell, &mut Text)>) {
     for (cell, mut text) in q.iter_mut() {
         **text = match cell {
-            RewardCell::Beacons     => format!("{}/{}", reward.beacons_remaining, BEACON_BUDGET),
-            RewardCell::Distance    => format_total(reward.distance),
-            RewardCell::Mineral     => format_total(reward.mineral_integral),
+            RewardCell::Beacons => format!("{}/{}", reward.beacons_remaining, BEACON_BUDGET),
+            RewardCell::Distance => format_total(reward.distance),
+            RewardCell::Mineral => format_total(reward.mineral_integral),
             RewardCell::BeaconBonus => format_total(reward.beacon_bonus),
-            RewardCell::Total       => format_total(reward.total()),
+            RewardCell::Total => format_total(reward.total()),
         };
     }
 }

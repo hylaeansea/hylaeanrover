@@ -14,12 +14,12 @@
 use bevy::prelude::*;
 use serde::Serialize;
 
+use crate::ChassisEntity;
 use crate::game_state::{GameOverReason, GameState, GameStatus};
 use crate::minerals::MineralMaps;
 use crate::power_cubes::PowerState;
-use crate::reward::{RewardState, BEACON_BUDGET};
+use crate::reward::{BEACON_BUDGET, RewardState};
 use crate::ui::UiFont;
-use crate::ChassisEntity;
 
 // ---- Resource: latest telemetry from each sensor -------------------------
 
@@ -159,7 +159,9 @@ fn format_telemetry_json(
     xforms: Query<&GlobalTransform>,
     mut text_q: Query<&mut Text, With<TelemetryText>>,
 ) {
-    let Ok(mut text) = text_q.single_mut() else { return };
+    let Ok(mut text) = text_q.single_mut() else {
+        return;
+    };
 
     // Sample mineral concentrations at the rover's current position.
     // If the rover hasn't spawned, fall back to the origin so the
@@ -174,7 +176,10 @@ fn format_telemetry_json(
     let minerals_g_m3 = minerals
         .surface_all_at(x, z)
         .into_iter()
-        .map(|(name, surface)| MineralTelemetry { name, surface: round_sig(surface, 4) })
+        .map(|(name, surface)| MineralTelemetry {
+            name,
+            surface: round_sig(surface, 4),
+        })
         .collect();
 
     let game_over = match game_state.status {
@@ -207,8 +212,8 @@ fn format_telemetry_json(
         game_over,
     };
 
-    **text = serde_json::to_string(&observation)
-        .unwrap_or_else(|e| format!("{{\"error\":\"{}\"}}", e));
+    **text =
+        serde_json::to_string(&observation).unwrap_or_else(|e| format!("{{\"error\":\"{}\"}}", e));
 }
 
 // ---- Helpers used by sensor systems --------------------------------------
@@ -216,9 +221,15 @@ fn format_telemetry_json(
 /// Round to the precision the JSON readout shows. Sensor systems should
 /// call these before writing into `RoverTelemetry` so the JSON output
 /// doesn't jitter through 6+ decimal digits.
-pub fn round1(v: f32) -> f32 { (v * 10.0).round() / 10.0 }
-pub fn round2(v: f32) -> f32 { (v * 100.0).round() / 100.0 }
-pub fn round3(v: f32) -> f32 { (v * 1000.0).round() / 1000.0 }
+pub fn round1(v: f32) -> f32 {
+    (v * 10.0).round() / 10.0
+}
+pub fn round2(v: f32) -> f32 {
+    (v * 100.0).round() / 100.0
+}
+pub fn round3(v: f32) -> f32 {
+    (v * 1000.0).round() / 1000.0
+}
 
 /// Round to `sig` significant figures. Used for mineral concentrations
 /// because they span ~9 orders of magnitude — He-3 is ≈0.003 g/m³ while
