@@ -365,6 +365,8 @@ fn consume_power_from_motion(
     xforms: Query<&GlobalTransform>,
     mut power: ResMut<PowerState>,
     keyboard: Res<ButtonInput<KeyCode>>,
+    action: Option<Res<crate::RoverAction>>,
+    autopilot: Option<Res<crate::AutopilotActive>>,
 ) {
     let Some(chassis_id) = chassis_res.0 else {
         power.last_chassis_pos = None;
@@ -375,13 +377,21 @@ fn consume_power_from_motion(
     };
     let pos = chassis_gxf.translation();
 
-    // We're "throttling" if the player is actively asking the motor to
-    // spin the wheels and there's energy to do it. If they're coasting
-    // (no input, or out of power) but the rover is still moving, we
-    // treat the motion as regenerative — sliding wheels can charge the
-    // battery at REGEN_EFFICIENCY of the equivalent drive cost.
-    let throttling =
-        power.has_power() && (keyboard.pressed(KeyCode::KeyW) || keyboard.pressed(KeyCode::KeyS));
+    // We're "throttling" if the player (or the policy) is actively asking
+    // the motor to spin the wheels and there's energy to do it. This must
+    // mirror `rover::drive`'s input resolution: in autopilot / RL mode the
+    // throttle command comes from `RoverAction`, not the keyboard — so a
+    // keyboard-only check would let the rover drive on policy power for
+    // free. If we're coasting (no input, or out of power) but the rover is
+    // still moving, we treat the motion as regenerative — sliding wheels
+    // can charge the battery at REGEN_EFFICIENCY of the equivalent cost.
+    let autopilot_active = autopilot.map(|a| a.0).unwrap_or(false);
+    let commanding_motor = match &action {
+        Some(a) if autopilot_active => a.throttle != 0.0,
+        Some(a) if a.throttle != 0.0 || a.steering != 0.0 => a.throttle != 0.0,
+        _ => keyboard.pressed(KeyCode::KeyW) || keyboard.pressed(KeyCode::KeyS),
+    };
+    let throttling = power.has_power() && commanding_motor;
 
     if let Some(last) = power.last_chassis_pos {
         let dist = (pos - last).length();
