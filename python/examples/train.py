@@ -32,6 +32,7 @@ from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.running_mean_std import RunningMeanStd
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize
 
+import hylaeanrover
 from hylaeanrover.wrappers import STAGES, make_staged_env, resolve_vecnorm
 
 
@@ -99,6 +100,17 @@ def main() -> None:
     p.add_argument("--eval-freq", type=int, default=25_000)
     p.add_argument("--n-eval-episodes", type=int, default=10)
     p.add_argument("--checkpoint-freq", type=int, default=100_000)
+    # PPO stability knobs. Defaults reproduce SB3's stock behavior, so the
+    # run is unchanged unless these are passed. They exist to fight the
+    # "climbs then collapses" failure mode: a rollout with an oversized
+    # policy update (approx_kl spike) knocks the policy into a degenerate
+    # region it can't escape.
+    p.add_argument("--n-epochs", type=int, default=10,
+                   help="PPO epochs per rollout; lower = smaller, more conservative updates")
+    p.add_argument("--ent-coef", type=float, default=0.0,
+                   help="entropy bonus; >0 (e.g. 0.01) keeps exploration alive to resist collapse")
+    p.add_argument("--target-kl", type=float, default=None,
+                   help="early-stop a rollout's epochs once approx_kl exceeds this (e.g. 0.02)")
     args = p.parse_args()
 
     os.makedirs(args.save, exist_ok=True)
@@ -136,6 +148,11 @@ def main() -> None:
     tb_dir = os.path.join(args.save, "tb")
     if args.load:
         model = PPO.load(args.load, env=venv, tensorboard_log=tb_dir, device="cpu")
+        # CLI flags are authoritative on a resume: apply the stability knobs
+        # rather than silently inheriting whatever the saved model used.
+        model.n_epochs = args.n_epochs
+        model.ent_coef = args.ent_coef
+        model.target_kl = args.target_kl
         print(f"Warm-started policy from {args.load}")
     else:
         model = PPO(
@@ -143,12 +160,19 @@ def main() -> None:
             venv,
             n_steps=2048,
             batch_size=64,
-            n_epochs=10,
+            n_epochs=args.n_epochs,
             gamma=0.99,
+            ent_coef=args.ent_coef,
+            target_kl=args.target_kl,
             tensorboard_log=tb_dir,
             verbose=1,
             device="cpu",
         )
+    print(
+        f"PPO: n_epochs={args.n_epochs} ent_coef={args.ent_coef} "
+        f"target_kl={args.target_kl}"
+    )
+    print(f"env binary: {hylaeanrover._native.__file__}")
 
     callbacks = [
         CheckpointCallback(

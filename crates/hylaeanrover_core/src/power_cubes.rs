@@ -201,6 +201,7 @@ impl Plugin for PowerCubesPlugin {
                 Update,
                 (
                     spawn_power_cubes,
+                    despawn_cubes_on_relaunch,
                     consume_power_from_motion,
                     detect_cube_pickup,
                     advance_charging_cubes,
@@ -411,6 +412,28 @@ fn consume_power_from_motion(
         }
     }
     power.last_chassis_pos = Some(pos);
+}
+
+// ---- Cube cleanup ---------------------------------------------------------
+
+/// Clear every power cube on `RelaunchEvent`, mirroring the rover and
+/// beacon respawn/cleanup. Cubes spawn as Dynamic rigid bodies on an
+/// uncapped Poisson process and otherwise only despawn when the rover
+/// collects one — so without this, uncollected cubes accumulate across
+/// every relaunch. In RL training (where each `reset()` fires a
+/// `RelaunchEvent`) that leak grows unbounded over a run, piling up
+/// rapier bodies and steadily dragging the physics step rate down.
+fn despawn_cubes_on_relaunch(
+    mut commands: Commands,
+    mut events: MessageReader<RelaunchEvent>,
+    cubes_q: Query<Entity, With<PowerCube>>,
+) {
+    if events.read().count() == 0 {
+        return;
+    }
+    for entity in cubes_q.iter() {
+        commands.entity(entity).despawn();
+    }
 }
 
 // ---- Cube pickup ----------------------------------------------------------
