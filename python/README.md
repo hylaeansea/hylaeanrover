@@ -9,25 +9,54 @@ episodes against it.
 
 You need a Rust toolchain (`rustup`) and Python ≥ 3.9.
 
+Keep the virtualenv **in this `python/` directory** (`python/.venv`). That
+one rule avoids a whole class of confusion: `maturin develop` auto-finds a
+`.venv` in the current or a parent folder, and everything — the extension,
+SB3, your `runs/` — lives next to the code that uses it. Don't train from a
+global interpreter or a second checkout; see "Which binary am I running?"
+below for why.
+
+### Recommended: `uv`
+
 ```bash
-# from the project root (one level up from this README)
 cd python
+uv venv --python 3.13
+source .venv/bin/activate
+uv pip install 'maturin[patchelf]>=1.4'
+# builds the extension and installs the [sb3] extra (sb3, torch,
+# tensorboard, onnx) + base deps into .venv. --uv is needed because
+# `uv venv` makes a pip-less venv; drop it after `uv pip install pip`.
+maturin develop --release --uv --extras sb3
+```
 
-# create + activate a venv
+### Plain `pip` alternative
+
+```bash
+cd python
 python -m venv .venv && source .venv/bin/activate
-
-# install maturin and project deps
 pip install 'maturin[patchelf]>=1.4'
-pip install -e '.[sb3]'   # gymnasium + numpy + sb3 + torch
-
-# build the Rust cdylib in-place
+pip install -e '.[sb3]'      # gymnasium + numpy + sb3 + torch + tensorboard + onnx
 maturin develop --release
 ```
 
-`maturin develop` compiles `crates/hylaeanrover_py` and drops the
-resulting `hylaeanrover_py.*.so` into the active venv's
-`site-packages/`. The Python package `hylaeanrover` (this directory)
-imports that extension module.
+`maturin develop` compiles `crates/hylaeanrover_py` and drops the resulting
+`_native.abi3.so` into `python/hylaeanrover/` (the `hylaeanrover._native`
+submodule), then installs the `hylaeanrover` package editable into the
+active venv. Re-run it after any change to the Rust crates.
+
+### Which binary am I running?
+
+The Rust extension is a compiled `.so`; editing the Rust source does nothing
+until you rebuild, and a `python` from the wrong venv/checkout will silently
+import a stale one. To check what's actually loaded:
+
+```bash
+python -c "import hylaeanrover, os; p = hylaeanrover._native.__file__; print(p, os.path.getmtime(p))"
+```
+
+The path should be *this* checkout's `python/hylaeanrover/_native.abi3.so`
+with a recent mtime. `examples/train.py` prints the same line at startup, so
+every training log records which binary produced it.
 
 ## Quick start
 

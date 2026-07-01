@@ -5,6 +5,11 @@
 **/*.pyc
 **/.venv/
 **/*.egg-info/
+# uv: we use `uv venv` + `uv pip install` (pip-interface), not project-mode
+# `uv sync`, so the lockfile / pinned version are local artifacts, not
+# authoritative. Un-ignore + commit them if this ever adopts `uv sync`.
+**/uv.lock
+**/.python-version
 
 # Build artifacts from `maturin develop`
 **/*.so
