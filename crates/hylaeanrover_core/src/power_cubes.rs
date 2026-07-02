@@ -1,8 +1,10 @@
-//! Glowing blue power cubes + the rover's energy reserve.
+//! Glowing, pulsing power cubes + the rover's energy reserve.
 //!
 //! - Cubes spawn on a homogeneous Poisson process (interarrival ~ Exp(λ))
 //!   inside the current terrain footprint. Each is a dynamic Rapier body
-//!   with an HDR-emissive material that picks up the camera's bloom.
+//!   with an HDR-emissive amber material that picks up the camera's
+//!   bloom and breathes in brightness while idle so it reads clearly
+//!   against gray terrain.
 //! - The rover keeps an energy reserve (`PowerState`, kWh-scale). Driving
 //!   drains it at `DRAIN_PER_METER` Wh per meter of chassis motion.
 //! - Bringing the rover next to a cube starts a half-second pickup
@@ -49,6 +51,12 @@ const PICKUP_RANGE: f32 = 2.0;
 const CHARGE_TIME: f32 = 0.5;
 /// Multiplier on the base emissive value at the peak of the glow ramp.
 const PEAK_EMISSIVE_MULT: f32 = 6.0;
+/// Idle cubes breathe between `1 - PULSE_AMPLITUDE` and `1 +
+/// PULSE_AMPLITUDE` times their base emissive so they stand out against
+/// static gray terrain even at a distance.
+const PULSE_AMPLITUDE: f32 = 0.55;
+/// Pulse angular speed (radians/sec).
+const PULSE_SPEED: f32 = 3.0;
 
 // ---- HUD palette (kept in sync with terrain_controls) ---------------------
 const PANEL_BG: Color = Color::srgba(0.03, 0.05, 0.08, 0.82);
@@ -75,6 +83,15 @@ struct Charging {
     /// Base emissive captured at the start of absorption so we ramp back
     /// up from the cube's actual idle glow, not a hard-coded constant.
     base_emissive: LinearRgba,
+}
+
+/// Captures a cube's idle (non-charging) emissive plus a per-cube phase
+/// offset so the pulse system can breathe its glow without every cube
+/// on the map flashing in lockstep.
+#[derive(Component)]
+struct PulseBase {
+    emissive: LinearRgba,
+    phase: f32,
 }
 
 #[derive(Component)]
@@ -227,6 +244,7 @@ impl Plugin for PowerCubesPlugin {
                     consume_power_from_motion,
                     detect_cube_pickup,
                     advance_charging_cubes,
+                    pulse_idle_cubes,
                     sync_power_ui,
                     update_tutorial_fade,
                     update_controls_hint,
@@ -356,10 +374,13 @@ fn spawn_power_cubes(
     );
 
     // Per-cube material so that ramping a cube's emissive during pickup
-    // only lights that cube, not every cube on the map.
+    // only lights that cube, not every cube on the map. Amber/orange
+    // reads far better against gray regolith and a blue sky than the
+    // old cyan-on-cyan combo did.
+    let idle_emissive = LinearRgba::new(9.0, 3.2, 0.15, 1.0);
     let material = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.05, 0.25, 0.95),
-        emissive: LinearRgba::new(0.2, 1.5, 8.0, 1.0),
+        base_color: Color::srgb(0.95, 0.45, 0.05),
+        emissive: idle_emissive,
         perceptual_roughness: 0.35,
         metallic: 0.1,
         ..default()
@@ -378,6 +399,12 @@ fn spawn_power_cubes(
             angvel: spin,
         },
         PowerCube,
+        PulseBase {
+            emissive: idle_emissive,
+            // Derive the phase from spawn position so cubes desync
+            // without needing extra RNG state.
+            phase: (x * 0.7 + z * 1.3).rem_euclid(std::f32::consts::TAU),
+        },
     ));
 }
 
@@ -478,6 +505,33 @@ fn reset_power_on_relaunch(
     }
     power.current = power.max;
     power.last_chassis_pos = None;
+}
+
+/// Breathe idle cubes' emissive up and down so they catch the eye even
+/// when stationary and far away. Cubes mid-`Charging` are excluded so
+/// this doesn't fight the pickup glow ramp.
+fn pulse_idle_cubes(
+    time: Res<Time>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    cubes: Query<
+        (&PulseBase, &MeshMaterial3d<StandardMaterial>),
+        (With<PowerCube>, Without<Charging>),
+    >,
+) {
+    let t = time.elapsed_secs();
+    for (pulse, mat_handle) in cubes.iter() {
+        let Some(mat) = materials.get_mut(&mat_handle.0) else {
+            continue;
+        };
+        let boost = 1.0 + PULSE_AMPLITUDE * (t * PULSE_SPEED + pulse.phase).sin();
+        let base = pulse.emissive;
+        mat.emissive = LinearRgba::new(
+            base.red * boost,
+            base.green * boost,
+            base.blue * boost,
+            base.alpha,
+        );
+    }
 }
 
 // ---- Cube pickup ----------------------------------------------------------
@@ -598,7 +652,7 @@ fn setup_tutorial_ui(mut commands: Commands, ui_font: Option<Res<UiFont>>) {
         ))
         .with_children(|banner| {
             banner.spawn((
-                Text::new("← drive over blue cubes to charge"),
+                Text::new("← drive over amber cubes to charge"),
                 ui_font.text(14.0),
                 TextColor(with_panel_alpha(TEXT_ACCENT, 0.0)),
             ));
