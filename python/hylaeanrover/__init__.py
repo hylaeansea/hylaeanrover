@@ -47,6 +47,7 @@ class RoverEnv(gym.Env):
         max_steps: int = 2000,
         render_mode: Optional[str] = None,
         beacons_enabled: bool = True,
+        power_capacity: Optional[float] = None,
     ) -> None:
         super().__init__()
         if render_mode is not None and render_mode != "rgb_array":
@@ -63,9 +64,16 @@ class RoverEnv(gym.Env):
         # curriculum's locomotion / mineral stages so the action space
         # stays Discrete(10) across all stages (clean weight transfer).
         self.beacons_enabled = beacons_enabled
+        # Battery capacity in Wh; None keeps the game's 1 kWh default.
+        # Training passes a small value so the power budget binds within
+        # one episode. The battery refills on every reset().
+        self.power_capacity = power_capacity
 
         self._env = _RustRoverEnv(
-            seed=seed, max_steps=max_steps, beacons_enabled=beacons_enabled
+            seed=seed,
+            max_steps=max_steps,
+            beacons_enabled=beacons_enabled,
+            power_capacity=power_capacity,
         )
         self._obs_dim = _RustRoverEnv.obs_dim()
         self._action_count = _RustRoverEnv.action_count()

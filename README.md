@@ -159,7 +159,7 @@ for _ in range(1000):
 env.close()
 ```
 
-Action layout (10 discrete) and the 42-float observation schema — plus
+Action layout (10 discrete) and the 41-float observation schema — plus
 the staged training curriculum (locomotion → minerals → full) — are
 documented in detail in [`python/README.md`](python/README.md) and
 [`docs/rl_training_plan.md`](docs/rl_training_plan.md).
@@ -203,7 +203,7 @@ hylaeanrover/
 │   │       ├── minerals.rs               6-element procedural concentration maps
 │   │       ├── power_cubes.rs            cubes, energy reserve, game-over modal
 │   │       ├── reward.rs                 RewardState + scoring + top-bar UI
-│   │       ├── observation.rs            shared 42-float obs builder (env + autopilot)
+│   │       ├── observation.rs            shared 41-float obs builder (env + autopilot)
 │   │       ├── telemetry.rs              RL observation resource + JSON readout
 │   │       ├── terrain.rs                heightfield + crater stamping
 │   │       ├── terrain_controls.rs       right-side terrain panel + regen

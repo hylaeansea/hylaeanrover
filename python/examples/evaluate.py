@@ -43,9 +43,17 @@ def _episode_metrics(info: dict[str, Any], ep_return: float, ep_len: int, trunca
 
 
 def run_random(
-    stage: str, episodes: int, seed: int, max_steps: int, frame_skip: int = 1
+    stage: str,
+    episodes: int,
+    seed: int,
+    max_steps: int,
+    frame_skip: int = 1,
+    power_capacity: float | None = None,
 ) -> list[dict[str, Any]]:
-    env = make_staged_env(stage, seed=seed, max_steps=max_steps, frame_skip=frame_skip)
+    env = make_staged_env(
+        stage, seed=seed, max_steps=max_steps, frame_skip=frame_skip,
+        power_capacity=power_capacity,
+    )
     rng = np.random.default_rng(seed)
     out = []
     for ep in range(episodes):
@@ -71,12 +79,18 @@ def run_model(
     model_path: str,
     vecnorm_path: str | None,
     frame_skip: int = 1,
+    power_capacity: float | None = None,
 ) -> list[dict[str, Any]]:
     from stable_baselines3 import PPO
     from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
     venv = DummyVecEnv(
-        [lambda: make_staged_env(stage, seed=seed, max_steps=max_steps, frame_skip=frame_skip)]
+        [
+            lambda: make_staged_env(
+                stage, seed=seed, max_steps=max_steps, frame_skip=frame_skip,
+                power_capacity=power_capacity,
+            )
+        ]
     )
     if vecnorm_path:
         venv = VecNormalize.load(vecnorm_path, venv)
@@ -129,19 +143,23 @@ def main() -> None:
     p.add_argument("--vecnorm", type=str, default=None, help="vecnorm.pkl to apply")
     p.add_argument("--frame-skip", type=int, default=1,
                    help="must match the value used during training")
+    p.add_argument("--power-capacity", type=float, default=None,
+                   help="battery capacity in Wh (default: the training default from "
+                        "hylaeanrover.wrappers); must match the value used during training")
     args = p.parse_args()
 
     if args.random:
         summarize(
             "random baseline",
-            run_random(args.stage, args.episodes, args.seed, args.max_steps, args.frame_skip),
+            run_random(args.stage, args.episodes, args.seed, args.max_steps, args.frame_skip,
+                       args.power_capacity),
         )
     elif args.load:
         vecnorm = resolve_vecnorm(args.load, args.vecnorm)
         summarize(
             f"trained ({args.load})",
             run_model(args.stage, args.episodes, args.seed, args.max_steps, args.load, vecnorm,
-                      args.frame_skip),
+                      args.frame_skip, args.power_capacity),
         )
     else:
         p.error("pass --random or --load <model.zip>")

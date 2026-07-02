@@ -9,25 +9,54 @@ episodes against it.
 
 You need a Rust toolchain (`rustup`) and Python ≥ 3.9.
 
+Keep the virtualenv **in this `python/` directory** (`python/.venv`). That
+one rule avoids a whole class of confusion: `maturin develop` auto-finds a
+`.venv` in the current or a parent folder, and everything — the extension,
+SB3, your `runs/` — lives next to the code that uses it. Don't train from a
+global interpreter or a second checkout; see "Which binary am I running?"
+below for why.
+
+### Recommended: `uv`
+
 ```bash
-# from the project root (one level up from this README)
 cd python
+uv venv --python 3.13
+source .venv/bin/activate
+uv pip install 'maturin[patchelf]>=1.4'
+# builds the extension and installs the [sb3] extra (sb3, torch,
+# tensorboard, onnx) + base deps into .venv. --uv is needed because
+# `uv venv` makes a pip-less venv; drop it after `uv pip install pip`.
+maturin develop --release --uv --extras sb3
+```
 
-# create + activate a venv
+### Plain `pip` alternative
+
+```bash
+cd python
 python -m venv .venv && source .venv/bin/activate
-
-# install maturin and project deps
 pip install 'maturin[patchelf]>=1.4'
-pip install -e '.[sb3]'   # gymnasium + numpy + sb3 + torch
-
-# build the Rust cdylib in-place
+pip install -e '.[sb3]'      # gymnasium + numpy + sb3 + torch + tensorboard + onnx
 maturin develop --release
 ```
 
-`maturin develop` compiles `crates/hylaeanrover_py` and drops the
-resulting `hylaeanrover_py.*.so` into the active venv's
-`site-packages/`. The Python package `hylaeanrover` (this directory)
-imports that extension module.
+`maturin develop` compiles `crates/hylaeanrover_py` and drops the resulting
+`_native.abi3.so` into `python/hylaeanrover/` (the `hylaeanrover._native`
+submodule), then installs the `hylaeanrover` package editable into the
+active venv. Re-run it after any change to the Rust crates.
+
+### Which binary am I running?
+
+The Rust extension is a compiled `.so`; editing the Rust source does nothing
+until you rebuild, and a `python` from the wrong venv/checkout will silently
+import a stale one. To check what's actually loaded:
+
+```bash
+python -c "import hylaeanrover, os; p = hylaeanrover._native.__file__; print(p, os.path.getmtime(p))"
+```
+
+The path should be *this* checkout's `python/hylaeanrover/_native.abi3.so`
+with a recent mtime. `examples/train.py` prints the same line at startup, so
+every training log records which binary produced it.
 
 ## Quick start
 
@@ -188,25 +217,31 @@ game-over never fires (see Staged training, above).
 
 ## Observation space
 
-`Box(low=-inf, high=+inf, shape=(42,), dtype=float32)`. The vector is
+`Box(low=-inf, high=+inf, shape=(41,), dtype=float32)`. The vector is
 the in-game JSON telemetry, flattened. Slot ranges (matches
-`crates/hylaeanrover_py/src/lib.rs::observation`):
+`crates/hylaeanrover_core/src/observation.rs`):
 
 | slot | length | content |
 |-----:|-------:|---------|
 | 0..7 | 7 | speed, heading, pitch, roll, yaw rate, accel fwd, accel lat |
 | 7..15 | 8 | lidar fan, meters (200 = no hit) |
 | 15..33 | 18 | 6 visible cubes × (bearing, range, valid_flag) |
-| 33..35 | 2 | power normalized 0..1, power Wh |
-| 35..41 | 6 | mineral concentrations under the rover (Si, Al, Fe, Ti, H2O, He-3) |
-| 41..42 | 1 | beacons remaining |
+| 33..34 | 1 | power remaining, fraction of capacity 0..1 |
+| 34..40 | 6 | mineral concentrations under the rover (Si, Al, Fe, Ti, H2O, He-3) |
+| 40..41 | 1 | beacons remaining |
+
+Power is exposed only as a fraction of capacity (no raw Wh slot) so the
+observation is invariant to the configured battery size — a policy
+trained on the RL env's small battery (`power_capacity`, see
+`hylaeanrover.wrappers.DEFAULT_POWER_CAPACITY_WH`) reads the same
+signal when driving the game's 1 kWh battery via the in-game autopilot.
 
 The cumulative reward breakdown and the game-over flag are deliberately
 **not** in the observation: the reward components grow unbounded within
 an episode and are non-Markovian (bad policy inputs), and the game-over
 flag is always 0 on the steps the agent acts on. The full per-component
 reward is still available in the `info` dict (see Reward, below) for
-shaping and logging. Keeping the observation shape fixed at 42 lets a
+shaping and logging. Keeping the observation shape fixed at 41 lets a
 policy trained on one curriculum stage transfer cleanly to the next.
 
 ## Reward

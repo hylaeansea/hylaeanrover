@@ -44,6 +44,17 @@ pub struct SteeringKnuckle {
     pub is_front: bool,
 }
 
+/// Marker on the suspension-hub and steering-knuckle rigid bodies that
+/// `attach_joints` spawns. These are linked to the chassis by rapier
+/// `ImpulseJoint`s, *not* the ECS hierarchy, so they are not children of
+/// `RoverRoot` and a recursive despawn of the root misses them. Tagging
+/// them lets respawn / relaunch clear them explicitly — without it every
+/// episode reset orphans 8 Dynamic bodies (4 hubs + 4 knuckles), which
+/// accumulates rapier bodies and steadily drags the physics step rate
+/// down over a long run (most visibly in headless RL training).
+#[derive(Component)]
+pub struct RoverJointBody;
+
 /// How the rover's visible entities are created.
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub enum RoverSpawnMode {
@@ -196,6 +207,7 @@ fn respawn_rover(
     mut commands: Commands,
     keyboard: Option<Res<ButtonInput<KeyCode>>>,
     rover_query: Query<Entity, With<RoverRoot>>,
+    joint_bodies_q: Query<Entity, With<RoverJointBody>>,
     chassis_xform_q: Query<&GlobalTransform>,
     asset_server: Option<Res<AssetServer>>,
     mut chassis_res: ResMut<ChassisEntity>,
@@ -229,6 +241,12 @@ fn respawn_rover(
     for entity in rover_query.iter() {
         commands.entity(entity).despawn();
     }
+    // The suspension hubs + steering knuckles are joint-linked, not ECS
+    // children, so the recursive despawn above misses them — clear them
+    // explicitly or they leak on every respawn.
+    for entity in joint_bodies_q.iter() {
+        commands.entity(entity).despawn();
+    }
     chassis_res.0 = None;
 
     match cfg.0 {
@@ -252,12 +270,20 @@ fn handle_relaunch_event(
     mut commands: Commands,
     mut events: MessageReader<RelaunchEvent>,
     rover_q: Query<Entity, With<RoverRoot>>,
+    joint_bodies_q: Query<Entity, With<RoverJointBody>>,
     mut chassis_res: ResMut<ChassisEntity>,
 ) {
     if events.read().count() == 0 {
         return;
     }
     for entity in rover_q.iter() {
+        commands.entity(entity).despawn();
+    }
+    // Joint-linked hubs + knuckles aren't ECS children of the root, so
+    // despawn them explicitly — otherwise every relaunch (i.e. every RL
+    // episode reset) orphans 8 Dynamic bodies and the physics step rate
+    // decays over the run.
+    for entity in joint_bodies_q.iter() {
         commands.entity(entity).despawn();
     }
     chassis_res.0 = None;
@@ -352,6 +378,7 @@ fn attach_joints(
                 }),
                 Sleeping::disabled(),
                 ImpulseJoint::new(chassis_id, suspension),
+                RoverJointBody,
             ))
             .id();
 
@@ -374,6 +401,7 @@ fn attach_joints(
                 Sleeping::disabled(),
                 ImpulseJoint::new(hub, steering_joint),
                 SteeringKnuckle { is_front },
+                RoverJointBody,
             ))
             .id();
 

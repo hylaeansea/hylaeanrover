@@ -40,6 +40,19 @@ STAGE_WEIGHTS: dict[str, dict[str, float]] = {
 
 STAGES = tuple(STAGE_WEIGHTS.keys())
 
+# Battery capacity (Wh) for training episodes, all stages. The game's
+# 1 kWh battery lasts ~2 km of driving — far more than one episode can
+# use — so with it, power never affects an episode and the policy can't
+# learn power management. This value is sized so a full-throttle episode
+# runs dry before the step limit (measured: flat-out over a 2000-tick
+# episode covers ~320 m and costs ~158 Wh, so 100 Wh dies ~63% in and
+# caps naive driving at ~230 m), making pacing / regen braking (coasting
+# recharges at 20% efficiency) part of the learned behavior.
+# The observation exposes power only as a fraction-of-capacity, so a
+# policy trained at this capacity transfers to the game's 1 kWh battery.
+# Applied to every stage so later stages don't unlearn it.
+DEFAULT_POWER_CAPACITY_WH = 100.0
+
 
 class ActionRepeat(gym.Wrapper):
     """Hold each chosen action for `k` physics ticks (frame-skip).
@@ -162,6 +175,7 @@ def make_staged_env(
     max_steps: int = 2000,
     flip_penalty: float = 50.0,
     frame_skip: int = 1,
+    power_capacity: Optional[float] = None,
 ) -> gym.Env:
     """Construct a `RoverEnv` configured for `stage` and wrap its reward.
 
@@ -174,13 +188,20 @@ def make_staged_env(
     in-game-autopilot time so the policy acts at the cadence it learned.
     Wrapping order is RoverEnv → ActionRepeat → StagedRewardWrapper, so
     the staged reward's per-step delta naturally spans all skipped ticks.
+
+    `power_capacity` (Wh) defaults to `DEFAULT_POWER_CAPACITY_WH` so the
+    battery binds within an episode; pass a larger value (e.g. 1000 for
+    the game's battery) to loosen it.
     """
     if stage not in STAGE_WEIGHTS:
         raise ValueError(f"unknown stage {stage!r}; choose from {STAGES}")
+    if power_capacity is None:
+        power_capacity = DEFAULT_POWER_CAPACITY_WH
     env: gym.Env = RoverEnv(
         seed=seed,
         max_steps=max_steps,
         beacons_enabled=(stage == "full"),
+        power_capacity=power_capacity,
     )
     if frame_skip > 1:
         env = ActionRepeat(env, frame_skip)

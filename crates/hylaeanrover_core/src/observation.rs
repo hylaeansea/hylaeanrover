@@ -2,11 +2,14 @@
 //! env (`hylaeanrover_py`) and the in-game autopilot produce *identical*
 //! inputs for the policy network.
 //!
-//! Layout (42 floats):
+//! Layout (41 floats):
 //!   - 7  IMU: speed, heading, pitch, roll, yaw rate, accel fwd, accel lat
 //!   - 8  lidar fan, meters (200 = no hit)
 //!   - 18 6 visible cubes × (bearing_deg, distance_m, valid_flag)
-//!   - 2  power: normalized 0..1, raw Wh
+//!   - 1  power: fraction of capacity remaining, 0..1. Deliberately the
+//!     fraction only (no raw Wh) so the observation is invariant to
+//!     the configured battery capacity — a policy trained on the RL
+//!     env's small battery reads the same signal on the game's 1 kWh.
 //!   - 6  mineral surface concentrations under the rover (Si..He-3)
 //!   - 1  beacons remaining
 //!
@@ -22,12 +25,12 @@ use crate::telemetry::RoverTelemetry;
 
 /// Total observation length. The single source of truth for both the
 /// Python `Box` space and the in-game policy input.
-pub const OBS_DIM: usize = 42;
+pub const OBS_DIM: usize = 41;
 
 /// Number of visible-cube slots in the observation (padded layout).
 pub const MAX_VISIBLE_CUBES: usize = 6;
 
-/// Build the 42-float observation vector from the simulation state.
+/// Build the 41-float observation vector from the simulation state.
 ///
 /// `chassis_pos` is the chassis's world position (used to sample mineral
 /// concentrations); pass `None` if the rover hasn't spawned yet, in which
@@ -66,8 +69,8 @@ pub fn build_observation(
         }
     }
 
-    // ---- Power (2) ----
-    obs.extend([power.current / power.max, power.current]);
+    // ---- Power (1) ----
+    obs.push(power.current / power.max);
 
     // ---- Mineral surface concentrations under the rover (6) ----
     match chassis_pos {

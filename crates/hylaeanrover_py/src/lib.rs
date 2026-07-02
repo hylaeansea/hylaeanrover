@@ -75,7 +75,7 @@ struct EnvInner {
 }
 
 impl EnvInner {
-    fn new(seed: u64, max_steps: u32, beacons_enabled: bool) -> Self {
+    fn new(seed: u64, max_steps: u32, beacons_enabled: bool, power_capacity: Option<f32>) -> Self {
         let mut app = App::new();
 
         // MinimalPlugins gives us TaskPool / Time / Schedule infra
@@ -111,6 +111,9 @@ impl EnvInner {
         // stages neutralize action index 9 (see RoverCoreConfig).
         let mut core_cfg = RoverCoreConfig::headless();
         core_cfg.beacons_enabled = beacons_enabled;
+        if let Some(wh) = power_capacity {
+            core_cfg.power_capacity_wh = wh;
+        }
         app.add_plugins(RoverCorePlugin(core_cfg));
 
         // Seed the action resource so the drive system always finds it.
@@ -209,11 +212,26 @@ impl RoverEnv {
     /// `truncated` rollout. `beacons_enabled` (default `true`) gates the
     /// beacon action: set it `false` in the RL curriculum's locomotion /
     /// mineral stages so action index 9 is an inert no-op and the
-    /// `beacons_deployed` game-over never fires.
+    /// `beacons_deployed` game-over never fires. `power_capacity` (Wh)
+    /// overrides the game's 1 kWh battery — the RL curriculum passes a
+    /// small value so the power budget binds within one episode. The
+    /// battery refills on every `reset()`.
     #[new]
-    #[pyo3(signature = (seed = 42, max_steps = 2000, beacons_enabled = true))]
-    fn new(seed: u64, max_steps: u32, beacons_enabled: bool) -> PyResult<Self> {
-        let mut inner = EnvInner::new(seed, max_steps, beacons_enabled);
+    #[pyo3(signature = (seed = 42, max_steps = 2000, beacons_enabled = true, power_capacity = None))]
+    fn new(
+        seed: u64,
+        max_steps: u32,
+        beacons_enabled: bool,
+        power_capacity: Option<f32>,
+    ) -> PyResult<Self> {
+        if let Some(wh) = power_capacity
+            && (!wh.is_finite() || wh <= 0.0)
+        {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "power_capacity must be a positive number of Wh",
+            ));
+        }
+        let mut inner = EnvInner::new(seed, max_steps, beacons_enabled, power_capacity);
         // Initial warm-up so the first `obs` returned from `reset()`
         // is non-trivial.
         inner.warm_up();
@@ -241,9 +259,14 @@ impl RoverEnv {
     fn reset(&self, _py: Python<'_>, seed: Option<u64>) -> PyResult<(Vec<f32>, String)> {
         let mut inner = self.inner.borrow_mut();
 
-        // Send a relaunch event — the existing reward/game_state/beacon
-        // systems all listen for this and reset cleanly.
+        // Send a relaunch event — the existing reward/game_state/beacon/
+        // power systems all listen for this and reset cleanly.
         inner.app.world_mut().write_message(RelaunchEvent);
+
+        // Clear the previous episode's action, or its throttle keeps
+        // driving the wheels through the settle updates below — draining
+        // the freshly reset battery before the episode even starts.
+        inner.app.insert_resource(RoverAction::default());
 
         if let Some(s) = seed {
             inner.seed = s;
@@ -348,6 +371,18 @@ fn make_info(inner: &EnvInner) -> String {
     map.insert(
         "beacons_remaining".into(),
         serde_json::Value::from(reward.beacons_remaining),
+    );
+    // Battery fraction remaining — lets training callbacks log how much
+    // of the power budget episodes actually use (and confirm resets
+    // refill it).
+    let power = world.resource::<PowerState>();
+    map.insert(
+        "power_frac".into(),
+        serde_json::Value::from(if power.max > 0.0 {
+            power.current / power.max
+        } else {
+            0.0
+        }),
     );
     serde_json::Value::Object(map).to_string()
 }
