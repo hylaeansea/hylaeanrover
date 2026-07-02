@@ -2,8 +2,8 @@
 
 Reports the metrics the go/no-go gates in `docs/rl_training_plan.md` use:
 mean episode return / length, terminal-reason breakdown, and the final
-per-component reward (distance, mineral integral, beacon bonus) plus
-beacons used.
+per-component reward (distance, cube bonus, mineral integral, beacon
+bonus) plus cubes picked up and beacons used.
 
 Examples
 --------
@@ -29,13 +29,24 @@ from hylaeanrover import BEACON_BUDGET
 from hylaeanrover.wrappers import STAGES, make_staged_env, resolve_vecnorm
 
 
-def _episode_metrics(info: dict[str, Any], ep_return: float, ep_len: int, truncated: bool) -> dict[str, Any]:
+def _episode_metrics(
+    info: dict[str, Any],
+    ep_return: float,
+    ep_len: int,
+    truncated: bool,
+    cube_pickups: float = 0.0,
+) -> dict[str, Any]:
     reason = info.get("game_over") or ("truncated" if truncated else "unknown")
     return {
         "return": ep_return,
         "length": ep_len,
         "reason": reason,
         "distance": float(info.get("reward_distance", 0.0)),
+        "cube_bonus": float(info.get("reward_cube_bonus", 0.0)),
+        # Per-episode pickup count, explicitly diffed by the caller against
+        # the cumulative `cube_pickups` info key (which is process-lifetime
+        # cumulative, not per-episode — see hylaeanrover_py's make_info()).
+        "cube_pickups": cube_pickups,
         "mineral": float(info.get("reward_mineral_integral", 0.0)),
         "beacon_bonus": float(info.get("reward_beacon_bonus", 0.0)),
         "beacons_used": BEACON_BUDGET - int(info.get("beacons_remaining", BEACON_BUDGET)),
@@ -58,6 +69,9 @@ def run_random(
     out = []
     for ep in range(episodes):
         obs, info = env.reset(seed=seed + ep)
+        # cube_pickups is cumulative across the env's whole lifetime, so
+        # the value right after reset() is this episode's baseline.
+        prev_pickups = float(info.get("cube_pickups", 0.0))
         ep_return, ep_len, truncated = 0.0, 0, False
         while True:
             action = int(rng.integers(env.action_space.n))
@@ -66,7 +80,8 @@ def run_random(
             ep_len += 1
             if terminated or truncated:
                 break
-        out.append(_episode_metrics(info, ep_return, ep_len, truncated))
+        cube_pickups = float(info.get("cube_pickups", 0.0)) - prev_pickups
+        out.append(_episode_metrics(info, ep_return, ep_len, truncated, cube_pickups))
     env.close()
     return out
 
@@ -101,6 +116,10 @@ def run_model(
     out = []
     obs = venv.reset()
     ep_return, ep_len = 0.0, 0
+    # cube_pickups is cumulative across the env's whole lifetime (0 at
+    # construction), so diffing consecutive episode-end totals gives each
+    # episode's pickup count.
+    prev_pickups = 0.0
     while len(out) < episodes:
         action, _ = model.predict(obs, deterministic=True)
         obs, rewards, dones, infos = venv.step(action)
@@ -110,7 +129,10 @@ def run_model(
             # DummyVecEnv has already autoreset; the pre-reset info is in
             # infos[0] (with the env's final telemetry keys preserved).
             truncated = bool(infos[0].get("TimeLimit.truncated", False))
-            out.append(_episode_metrics(infos[0], ep_return, ep_len, truncated))
+            total_pickups = float(infos[0].get("cube_pickups", 0.0))
+            cube_pickups = total_pickups - prev_pickups
+            prev_pickups = total_pickups
+            out.append(_episode_metrics(infos[0], ep_return, ep_len, truncated, cube_pickups))
             ep_return, ep_len = 0.0, 0
     venv.close()
     return out
@@ -124,6 +146,8 @@ def summarize(label: str, eps: list[dict[str, Any]]) -> None:
     print(f"  return        mean={arr('return').mean():10.2f}  std={arr('return').std():8.2f}")
     print(f"  length        mean={arr('length').mean():10.1f}  std={arr('length').std():8.1f}")
     print(f"  distance      mean={arr('distance').mean():10.2f}")
+    print(f"  cube_bonus    mean={arr('cube_bonus').mean():10.2f}")
+    print(f"  cube_pickups  mean={arr('cube_pickups').mean():10.2f}")
     print(f"  mineral       mean={arr('mineral').mean():10.2f}")
     print(f"  beacon_bonus  mean={arr('beacon_bonus').mean():10.2f}")
     print(f"  beacons_used  mean={arr('beacons_used').mean():10.2f}")

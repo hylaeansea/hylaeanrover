@@ -31,13 +31,13 @@ is reward annealing / curriculum learning — nothing is discarded.
 - Env: `crates/hylaeanrover_py/src/lib.rs` — `RoverEnv` pyclass, fixed 1/60s
   `step()`, deterministic.
 - Wrapper: `python/hylaeanrover/__init__.py` — `Discrete(10)` actions,
-  `Box(47,)` observations.
-- Reward: `crates/hylaeanrover_core/src/reward.rs` — distance + mineral
-  line-integral + beacon bonus (50×).
+  `Box(41,)` observations (see the 2026-07-01 log entry below).
+- Reward: `crates/hylaeanrover_core/src/reward.rs` — distance + cube pickup
+  bonus (flat) + mineral line-integral + beacon bonus (50×).
 - `make_info()` already emits **per-component** cumulative reward
-  (`reward_distance`, `reward_mineral_integral`, `reward_beacon_bonus`) — so
-  stage-specific reward can be recomputed in Python from info deltas with no
-  Rust reward changes.
+  (`reward_distance`, `reward_cube_bonus`, `reward_mineral_integral`,
+  `reward_beacon_bonus`) — so stage-specific reward can be recomputed in
+  Python from info deltas with no Rust reward changes.
 
 ### Blockers for real training (not yet addressed)
 
@@ -65,11 +65,12 @@ is reward annealing / curriculum learning — nothing is discarded.
 These two things are decided **now and never change again**, so weights
 transfer across all stages:
 
-- **Observation (fixed):** trim the 4 cumulative reward components
-  (slots 41–45) and the game_over flag (slot 46) out of `observation()`.
-  Keep `beacons_remaining` (Markovian, useful). New `OBS_DIM = 42`.
-  The Python `observation_space` is built from `RoverEnv.obs_dim()`
-  dynamically, so it tracks automatically.
+- **Observation (fixed):** trim the cumulative reward components and the
+  game_over flag out of `observation()`. Keep `beacons_remaining`
+  (Markovian, useful). `OBS_DIM = 41` (see the 2026-07-01 log entry: the
+  raw-Wh power slot was later dropped too, keeping only the 0..1
+  fraction). The Python `observation_space` is built from
+  `RoverEnv.obs_dim()` dynamically, so it tracks automatically.
 - **Action (fixed): `Discrete(10)` in every stage.** In stages where
   beacons aren't part of the objective, action 9 must become a true no-op
   rather than silently ending the episode after 5 presses (see the
@@ -79,16 +80,26 @@ transfer across all stages:
 ### Stages (only the reward changes)
 
 - **Stage 0 — Locomotion.** Reward = distance delta (+ small flip penalty,
-  small alive bonus). Beacons & mineral integral excluded. Agent learns to
-  drive far, steer, manage power (power cubes are in the obs), not flip.
-  Densest signal; fastest proof of learning.
-- **Stage 1 — Drive + minerals.** Reward = distance + scarcity-weighted
-  mineral integral. Load Stage 0 weights, continue. Motor skills transfer;
-  agent now also steers toward scarce ground.
-- **Stage 2 — Full mission.** Reward adds the beacon bonus; `beacons_enabled`
+  small alive bonus). Cube/mineral/beacon bonuses excluded. Agent learns to
+  drive far, steer, manage power (power cubes are in the obs but not yet
+  rewarded), not flip. Densest signal; fastest proof of learning.
+- **Stage 1 — Power cubes.** Reward = distance + flat per-pickup cube bonus
+  (`CUBE_PICKUP_BONUS` in `reward.rs`). Load Stage 0 weights, continue.
+  Motor skills transfer; agent now also steers toward the visible-cube
+  sensor's bearing/distance readout instead of driving blind. The cube
+  Poisson spawn is also densified and its region shrunk for this stage
+  only (`DEFAULT_CUBE_SPAWN_LAMBDA`/`DEFAULT_CUBE_SPAWN_EXTENT` in
+  `wrappers.py`) — the game's spawn rate is tuned for minutes of human
+  play, not one ~33s episode, so an unmodified episode sees too few
+  reachable cubes for reliable seek-behavior gradient signal.
+- **Stage 2 — Drive + minerals.** Reward = distance + cube bonus +
+  scarcity-weighted mineral integral. Load Stage 1 weights, continue.
+  Motor + seek skills transfer; agent now also steers toward scarce
+  ground.
+- **Stage 3 — Full mission.** Reward adds the beacon bonus; `beacons_enabled`
   on so action 9 places beacons and `BeaconsDeployed` can end the run. Load
-  Stage 1 weights, continue. Agent already drives and seeks minerals — it
-  only has to learn *when* to drop beacons.
+  Stage 2 weights, continue. Agent already drives, seeks cubes, and finds
+  minerals — it only has to learn *when* to drop beacons.
 
 Reward staging itself lives in **Python** (a `gym.Wrapper`) computing each
 stage's reward from the per-component info deltas. This keeps shaping fast to
@@ -160,9 +171,14 @@ Dir: `python/` (add extras as needed: `tensorboard`).
 - **Stage 0 → 1:** trained mean episode distance clearly beats the random
   baseline and flip-rate drops (e.g. distance ≳ 2–3× random, flip-rate
   trending down) over an eval batch.
-- **Stage 1 → 2:** mineral-integral component per episode beats a
-  distance-only Stage 0 policy evaluated under the Stage 1 reward.
-- **Stage 2 done:** agent places beacons and beacon-bonus per episode beats
+- **Stage 1 → 2:** mean cube-pickup bonus (and/or pickups/episode) per
+  episode clearly exceeds a distance-only Stage 0 policy evaluated under
+  the Stage 1 reward (near-zero, since it has no seek incentive), and/or
+  mean end-of-episode power fraction rises relative to Stage 0.
+- **Stage 2 → 3:** mineral-integral component per episode beats a
+  Stage 1 policy evaluated under the Stage 2 reward, without the
+  cube-pickup rate regressing badly from Stage 1.
+- **Stage 3 done:** agent places beacons and beacon-bonus per episode beats
   a random-beacon-timing baseline.
 
 ## Verification (end-to-end)
@@ -170,7 +186,7 @@ Dir: `python/` (add extras as needed: `tensorboard`).
 1. `cd python && source .venv/bin/activate && maturin develop --release`
    (rebuilds the cdylib after the Rust obs/knob changes).
 2. `python examples/train_ppo.py` — confirm `check_env` still passes with
-   `OBS_DIM == 42` and the smoke PPO run completes.
+   `OBS_DIM == 41` and the smoke PPO run completes.
 3. `python examples/evaluate.py --random` — record baseline metrics.
 4. `python examples/train.py --stage locomotion --timesteps 1000000 --save runs/stage0`
    then `evaluate.py --load runs/stage0` — confirm Stage 0 gate.
@@ -323,3 +339,70 @@ mid-training via the O key.
   - Verified: battery refills across resets (obs slot 33 back to 1.0),
     out-of-power binds mid-episode at 100 Wh, smoke PPO run logs the new
     metrics end-to-end.
+- 2026-07-02 — Added the `power_cubes` stage and root-caused two failures
+  found while actually training it, plus a train/deploy config mismatch
+  found while watching the result in the game:
+  - **Stage added**: `locomotion → power_cubes → minerals → full`. New
+    `RewardState.cube_bonus` component (`reward.rs`), credited from
+    `power_cubes.rs::advance_charging_cubes`. `STAGE_WEIGHTS` in
+    `wrappers.py` carries the `cube` weight forward from `power_cubes`
+    onward, same as `distance`.
+  - **Root-caused near-zero learning signal**: cube spawns were anchored
+    to world origin (`SPAWN_EXTENT` around `(0,0)`), but the
+    `locomotion`-warm-started policy already drives ~200 m away fairly
+    directly — an origin-anchored box stopped overlapping its path almost
+    immediately, so no density tuning could fix it. `spawn_power_cubes`
+    now samples an annulus `[10m, extent)` around the rover's *current*
+    position instead — rover-anchored so cubes stay reachable, with a
+    minimum spawn distance so every cube requires real navigation (a
+    plain rover-centred box lets cubes land within grabbing range of a
+    near-stationary policy). Density/extent are stage-configurable
+    (`RoverCoreConfig.cube_spawn_lambda` / `cube_spawn_extent`, mirroring
+    `power_capacity_wh`), **training-only** — the game keeps its sparse
+    0.05/s "periodic lifeline" feel; the trained seek skill is a local
+    reactive behavior and transfers across densities ("train dense,
+    deploy sparse"). `power_cubes` uses `λ=1.5/s, extent=30m` —
+    calibrated by measuring pickups/episode against the actual warm-start
+    policy (not a random baseline, which is a poor proxy): ~0.5
+    pickups/episode, a positive example about every other episode. An
+    earlier `λ=3.5/s` pick maximized signal but visually "rained" cubes
+    (~117 spawns/episode, ~99% never collected); `MAX_ALIVE_CUBES = 150`
+    in `power_cubes.rs` now also hard-caps uncollected pileup in
+    unbounded (non-episode) game sessions regardless of configured rate.
+  - **Root-caused a ~200-300k-step PPO collapse** (`approx_kl` spike,
+    `explained_variance` crash, reward climbing then permanently
+    dropping): `CUBE_PICKUP_BONUS=100` was credited as a single-tick spike
+    on charge completion — ~100-1000x the surrounding per-tick distance
+    signal, landing in only about half of episodes. That variance wrecked
+    GAE advantage estimates and blew up a policy update. Fix:
+    `RewardState::credit_cube_charge` now pays the same total out
+    smoothly across the ~0.5s charge (~3.3/tick instead of +100 once);
+    per-episode totals are unchanged (the deltas telescope to exactly
+    `CUBE_PICKUP_BONUS`).
+  - **Root-caused a train/deploy config mismatch**: a `power_cubes`
+    checkpoint watched via the in-game autopilot drove to ~200m and
+    rapid-fired all 5 beacons, ending the run. Training sets
+    `beacons_enabled=false`, so action 9 is an inert no-op there
+    (identical to coasting, never differentiated from it) — but the game
+    always runs with beacons live, and at ~200m the rover is past
+    everything the 100 Wh training battery ever let it reach (out of
+    training distribution). `export_policy.py` now records the stage's
+    `beacons_enabled` / `power_capacity_wh` in `.norm.json`; `main.rs`
+    reads them back via `autopilot::resolve_core_config` *before*
+    constructing `RoverCorePlugin`, so watching a non-`full`-stage
+    checkpoint replays it under the same battery/beacon conditions it
+    trained in. The training cube-spawn config is deliberately *not*
+    carried over: it calibrates a spawn rate for a bounded ~33s episode
+    that gets wiped every reset, and applying it to the game's unbounded
+    session piled up cubes without limit (first version of this fix did
+    exactly that). Old-format sidecars (missing these keys) fall back to
+    the game's defaults unchanged — see `autopilot.rs`'s unit tests for
+    the fallback matrix. The committed `models/locomotion/model.norm.json`
+    was re-exported (from the existing `model.zip`/`vecnorm.pkl`, no
+    retraining) to pick this up.
+  - Verified: `cargo test --workspace` (autopilot unit tests) and
+    `cargo clippy --workspace --tests` pass; re-exported both
+    `locomotion` and a `power_cubes` checkpoint and confirmed the correct
+    fields land in `.norm.json` (and the cube-spawn fields don't);
+    launched the game with a `power_cubes` `.norm.json` and confirmed the
+    startup log shows `beacons_enabled=false, power_capacity_wh=100`.

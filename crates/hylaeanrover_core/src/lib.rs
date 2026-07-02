@@ -49,6 +49,14 @@ pub struct RoverCoreConfig {
     /// within a single episode and power management becomes part of
     /// the learned behavior.
     pub power_capacity_wh: f32,
+    /// Power-cube Poisson spawn rate (cubes/sec). The game and most RL
+    /// stages keep the default; the `power_cubes` curriculum stage raises
+    /// it so a short episode sees enough cubes to learn seek behavior.
+    pub cube_spawn_lambda: f32,
+    /// Half-width (m) of the square region power cubes spawn within. The
+    /// game and most RL stages keep the default; the `power_cubes` stage
+    /// shrinks it so denser cubes stay reachable within one episode.
+    pub cube_spawn_extent: f32,
 }
 
 impl Default for RoverCoreConfig {
@@ -58,6 +66,8 @@ impl Default for RoverCoreConfig {
             with_ui: true,
             beacons_enabled: true,
             power_capacity_wh: power_cubes::POWER_MAX,
+            cube_spawn_lambda: power_cubes::SPAWN_LAMBDA,
+            cube_spawn_extent: power_cubes::SPAWN_EXTENT,
         }
     }
 }
@@ -69,6 +79,8 @@ impl RoverCoreConfig {
             with_ui: false,
             beacons_enabled: true,
             power_capacity_wh: power_cubes::POWER_MAX,
+            cube_spawn_lambda: power_cubes::SPAWN_LAMBDA,
+            cube_spawn_extent: power_cubes::SPAWN_EXTENT,
         }
     }
 }
@@ -119,6 +131,8 @@ impl Plugin for RoverCorePlugin {
         app.add_plugins(terrain_controls::TerrainControlsPlugin)
             .add_plugins(power_cubes::PowerCubesPlugin {
                 capacity_wh: self.0.power_capacity_wh,
+                spawn_lambda: self.0.cube_spawn_lambda,
+                spawn_extent: self.0.cube_spawn_extent,
             })
             .add_plugins(beacons::BeaconsPlugin)
             .add_plugins(minerals::MineralsPlugin)

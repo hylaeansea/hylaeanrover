@@ -75,7 +75,14 @@ struct EnvInner {
 }
 
 impl EnvInner {
-    fn new(seed: u64, max_steps: u32, beacons_enabled: bool, power_capacity: Option<f32>) -> Self {
+    fn new(
+        seed: u64,
+        max_steps: u32,
+        beacons_enabled: bool,
+        power_capacity: Option<f32>,
+        cube_spawn_lambda: Option<f32>,
+        cube_spawn_extent: Option<f32>,
+    ) -> Self {
         let mut app = App::new();
 
         // MinimalPlugins gives us TaskPool / Time / Schedule infra
@@ -113,6 +120,12 @@ impl EnvInner {
         core_cfg.beacons_enabled = beacons_enabled;
         if let Some(wh) = power_capacity {
             core_cfg.power_capacity_wh = wh;
+        }
+        if let Some(lambda) = cube_spawn_lambda {
+            core_cfg.cube_spawn_lambda = lambda;
+        }
+        if let Some(extent) = cube_spawn_extent {
+            core_cfg.cube_spawn_extent = extent;
         }
         app.add_plugins(RoverCorePlugin(core_cfg));
 
@@ -215,14 +228,20 @@ impl RoverEnv {
     /// `beacons_deployed` game-over never fires. `power_capacity` (Wh)
     /// overrides the game's 1 kWh battery — the RL curriculum passes a
     /// small value so the power budget binds within one episode. The
-    /// battery refills on every `reset()`.
+    /// battery refills on every `reset()`. `cube_spawn_lambda` (cubes/sec)
+    /// and `cube_spawn_extent` (m) override the power-cube Poisson spawn
+    /// rate / region — the `power_cubes` curriculum stage raises the rate
+    /// and shrinks the region so a short episode has enough reachable
+    /// cubes to learn seek behavior from.
     #[new]
-    #[pyo3(signature = (seed = 42, max_steps = 2000, beacons_enabled = true, power_capacity = None))]
+    #[pyo3(signature = (seed = 42, max_steps = 2000, beacons_enabled = true, power_capacity = None, cube_spawn_lambda = None, cube_spawn_extent = None))]
     fn new(
         seed: u64,
         max_steps: u32,
         beacons_enabled: bool,
         power_capacity: Option<f32>,
+        cube_spawn_lambda: Option<f32>,
+        cube_spawn_extent: Option<f32>,
     ) -> PyResult<Self> {
         if let Some(wh) = power_capacity
             && (!wh.is_finite() || wh <= 0.0)
@@ -231,7 +250,14 @@ impl RoverEnv {
                 "power_capacity must be a positive number of Wh",
             ));
         }
-        let mut inner = EnvInner::new(seed, max_steps, beacons_enabled, power_capacity);
+        let mut inner = EnvInner::new(
+            seed,
+            max_steps,
+            beacons_enabled,
+            power_capacity,
+            cube_spawn_lambda,
+            cube_spawn_extent,
+        );
         // Initial warm-up so the first `obs` returned from `reset()`
         // is non-trivial.
         inner.warm_up();
@@ -369,6 +395,10 @@ fn make_info(inner: &EnvInner) -> String {
         serde_json::Value::from(reward.beacon_bonus),
     );
     map.insert(
+        "reward_cube_bonus".into(),
+        serde_json::Value::from(reward.cube_bonus),
+    );
+    map.insert(
         "beacons_remaining".into(),
         serde_json::Value::from(reward.beacons_remaining),
     );
@@ -383,6 +413,15 @@ fn make_info(inner: &EnvInner) -> String {
         } else {
             0.0
         }),
+    );
+    // Raw pickup counter — NOTE: cumulative across the process's whole
+    // lifetime (never reset on `RelaunchEvent`, see `PowerState`), not
+    // per-episode. Use `reward_cube_bonus` (resets every episode) for any
+    // per-episode pickup metric; this is only a coarse cross-episode
+    // sanity check that pickups are happening at all.
+    map.insert(
+        "cube_pickups".into(),
+        serde_json::Value::from(power.pickups_count),
     );
     serde_json::Value::Object(map).to_string()
 }

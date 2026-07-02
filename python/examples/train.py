@@ -76,6 +76,11 @@ class EpisodeOutcomeCallback(BaseCallback):
       episodes/frac_flipped       tipped past the flip angle at rest
       episodes/end_power_frac     mean battery fraction left at episode
                                   end — how hard the power budget binds
+      episodes/mean_cube_bonus    mean per-episode cube pickup bonus
+                                  (reward_cube_bonus resets every episode,
+                                  so this is already episode-scoped;
+                                  divide by CUBE_PICKUP_BONUS in
+                                  reward.rs for mean pickups/episode)
     """
 
     _REASONS = ("time_limit", "out_of_power", "flipped", "beacons_deployed", "other")
@@ -84,6 +89,7 @@ class EpisodeOutcomeCallback(BaseCallback):
         super().__init__()
         self._counts: Counter[str] = Counter()
         self._end_power: list[float] = []
+        self._cube_bonus: list[float] = []
 
     def _on_step(self) -> bool:
         for done, info in zip(self.locals["dones"], self.locals["infos"]):
@@ -97,6 +103,8 @@ class EpisodeOutcomeCallback(BaseCallback):
             self._counts[reason if reason in self._REASONS else "other"] += 1
             if "power_frac" in info:
                 self._end_power.append(float(info["power_frac"]))
+            if "reward_cube_bonus" in info:
+                self._cube_bonus.append(float(info["reward_cube_bonus"]))
         return True
 
     def _on_rollout_end(self) -> None:
@@ -109,8 +117,13 @@ class EpisodeOutcomeCallback(BaseCallback):
             self.logger.record(
                 "episodes/end_power_frac", float(np.mean(self._end_power))
             )
+        if self._cube_bonus:
+            self.logger.record(
+                "episodes/mean_cube_bonus", float(np.mean(self._cube_bonus))
+            )
         self._counts.clear()
         self._end_power.clear()
+        self._cube_bonus.clear()
 
 
 def _env_thunk(stage: str, seed: int, max_steps: int, frame_skip: int, power_capacity: float):

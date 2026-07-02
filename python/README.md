@@ -94,21 +94,32 @@ python examples/train.py --stage locomotion --timesteps 1000000 --save runs/stag
 python examples/evaluate.py --stage locomotion --load runs/stage0/model.zip \
     --vecnorm runs/stage0/vecnorm.pkl
 
-# Stage 1 — drive + minerals (warm-started from stage 0)
-python examples/train.py --stage minerals --timesteps 1000000 \
+# Stage 1 — power cubes (seek + collect, warm-started from stage 0)
+python examples/train.py --stage power_cubes --timesteps 1000000 \
     --load runs/stage0/model.zip --vecnorm runs/stage0/vecnorm.pkl --save runs/stage1
 
-# Stage 2 — full mission incl. beacons (warm-started from stage 1)
-python examples/train.py --stage full --timesteps 1000000 \
+# Stage 2 — drive + minerals (warm-started from stage 1)
+python examples/train.py --stage minerals --timesteps 1000000 \
     --load runs/stage1/model.zip --vecnorm runs/stage1/vecnorm.pkl --save runs/stage2
+
+# Stage 3 — full mission incl. beacons (warm-started from stage 2)
+python examples/train.py --stage full --timesteps 1000000 \
+    --load runs/stage2/model.zip --vecnorm runs/stage2/vecnorm.pkl --save runs/stage3
 
 tensorboard --logdir runs/
 ```
 
 `RoverEnv(..., beacons_enabled=False)` makes action index 9 an inert
-no-op (and disables the `beacons_deployed` game-over) — used by the
-locomotion/minerals stages so the action space stays `Discrete(10)`
-throughout. The reward shaping lives in
+no-op (and disables the `beacons_deployed` game-over) — used by every
+stage but `full` so the action space stays `Discrete(10)` throughout.
+The `power_cubes` stage also raises the power-cube spawn rate and
+shrinks the spawn region (`DEFAULT_CUBE_SPAWN_LAMBDA`/
+`DEFAULT_CUBE_SPAWN_EXTENT` in `hylaeanrover/wrappers.py`) so a short
+episode has enough reachable cubes to learn seek behavior from; later
+stages keep the denser spawn. This is training-only: the game keeps its
+own sparse, periodic spawn rate, and the exported autopilot bundle
+deliberately does not carry the training density over ("train dense,
+deploy sparse"). The reward shaping lives in
 `hylaeanrover.wrappers.StagedRewardWrapper`.
 
 ### Speeding up training
@@ -183,9 +194,9 @@ Then everything just points at the bundle:
 
 ```bash
 # resume / warm-start the next stage from the stage's best
-python examples/train.py --stage minerals --timesteps 1000000 \
+python examples/train.py --stage power_cubes --timesteps 1000000 \
     --load models/locomotion/model.zip --vecnorm models/locomotion/vecnorm.pkl \
-    --save runs/minerals
+    --save runs/power_cubes
 # watch the best
 cargo run -p hylaeanrover_game --release -- --policy models/locomotion/model.onnx
 ```

@@ -4,13 +4,13 @@ The training plan (see `docs/rl_training_plan.md`) trains the rover in
 stages that share one fixed observation/action space and differ *only*
 in the reward, so each stage's policy weights initialize the next:
 
-    locomotion  →  minerals  →  full
+    locomotion  →  power_cubes  →  minerals  →  full
 
 `StagedRewardWrapper` recomputes the per-step reward from the cumulative
 reward components the Rust env already exposes in its `info` dict
-(`reward_distance`, `reward_mineral_integral`, `reward_beacon_bonus`),
-weighting them per stage. Keeping the shaping in Python means we can
-retune it without rebuilding the Rust extension.
+(`reward_distance`, `reward_cube_bonus`, `reward_mineral_integral`,
+`reward_beacon_bonus`), weighting them per stage. Keeping the shaping in
+Python means we can retune it without rebuilding the Rust extension.
 
 `make_staged_env` is the convenience constructor: it picks the right
 `beacons_enabled` for the stage (off for locomotion/minerals so action
@@ -26,16 +26,21 @@ import gymnasium as gym
 
 from hylaeanrover import RoverEnv
 
-# Per-stage weights on the three reward components. The component values
-# themselves come from the Rust reward (distance in meters, the
-# scarcity-weighted mineral line-integral, and the 50x beacon bonus).
+# Per-stage weights on the four reward components. The component values
+# themselves come from the Rust reward (distance in meters, the flat
+# per-pickup cube bonus, the scarcity-weighted mineral line-integral, and
+# the 50x beacon bonus). Once a component's weight turns on for a stage it
+# stays on for every later stage too — nothing already learned is
+# discarded, only new objectives are layered on top (reward annealing).
 STAGE_WEIGHTS: dict[str, dict[str, float]] = {
     # Drive far, stay upright, manage power. Densest signal.
-    "locomotion": {"distance": 1.0, "mineral": 0.0, "beacon": 0.0},
+    "locomotion": {"distance": 1.0, "cube": 0.0, "mineral": 0.0, "beacon": 0.0},
+    # Also reward actively seeking out and collecting power cubes.
+    "power_cubes": {"distance": 1.0, "cube": 1.0, "mineral": 0.0, "beacon": 0.0},
     # Also reward crossing scarce-mineral ground.
-    "minerals": {"distance": 1.0, "mineral": 1.0, "beacon": 0.0},
+    "minerals": {"distance": 1.0, "cube": 1.0, "mineral": 1.0, "beacon": 0.0},
     # Full mission, including strategic beacon placement.
-    "full": {"distance": 1.0, "mineral": 1.0, "beacon": 1.0},
+    "full": {"distance": 1.0, "cube": 1.0, "mineral": 1.0, "beacon": 1.0},
 }
 
 STAGES = tuple(STAGE_WEIGHTS.keys())
@@ -52,6 +57,36 @@ STAGES = tuple(STAGE_WEIGHTS.keys())
 # policy trained at this capacity transfers to the game's 1 kWh battery.
 # Applied to every stage so later stages don't unlearn it.
 DEFAULT_POWER_CAPACITY_WH = 100.0
+
+# Power-cube spawn rate (cubes/sec) and spawn-region max radius (m) for
+# the power_cubes stage onward — TRAINING ONLY. These are deliberately
+# NOT exported to the game (see export.py): they exist to give PPO enough
+# positive seek-and-collect examples per episode to learn from, not to
+# define the gameplay feel. The game keeps its own sparse, periodic rate
+# (0.05/sec) where a cube is a scarce lifeline, and the learned skill —
+# steer toward a sensed cube when one exists — transfers across densities
+# because it's a local reactive behavior, not a density-dependent one
+# ("train dense, deploy sparse").
+#
+# Spawns are drawn in an annulus [10m, extent) around the rover's
+# *current* position (see power_cubes::spawn_power_cubes): rover-anchored
+# because an origin-anchored region stops overlapping a competent
+# driver's path almost immediately (the warm-started policy covers
+# ~200m/episode), and with a minimum distance so every cube requires real
+# navigation — without it, a near-stationary policy could wait for cubes
+# to land within reach.
+#
+# Values calibrated against the actual `models/locomotion` warm-start
+# policy (a random policy is a poor proxy for a driver that covers
+# ~200m/episode): measured sweep over the annulus mechanic gave
+# 1.0/30m -> 0.20, 1.0/40m -> 0.30, 1.5/30m -> 0.52, 2.0/30m -> 0.70
+# pickups/episode. 1.5/30m is the chosen balance: a positive example
+# roughly every other episode (enough signal for PPO) at less than half
+# the spawn volume of denser settings that visually "rained" cubes.
+# Re-measure with `PPO.load(...)` + a few dozen eval episodes (see git
+# history for the calibration script) if retuning.
+DEFAULT_CUBE_SPAWN_LAMBDA = 1.5
+DEFAULT_CUBE_SPAWN_EXTENT = 30.0
 
 
 class ActionRepeat(gym.Wrapper):
@@ -109,12 +144,13 @@ class StagedRewardWrapper(gym.Wrapper):
         self.flip_penalty = flip_penalty
         # Cumulative component totals from the previous step, so we can
         # take deltas. Seeded in reset().
-        self._prev = {"distance": 0.0, "mineral": 0.0, "beacon": 0.0}
+        self._prev = {"distance": 0.0, "cube": 0.0, "mineral": 0.0, "beacon": 0.0}
 
     @staticmethod
     def _components(info: dict[str, Any]) -> dict[str, float]:
         return {
             "distance": float(info.get("reward_distance", 0.0)),
+            "cube": float(info.get("reward_cube_bonus", 0.0)),
             "mineral": float(info.get("reward_mineral_integral", 0.0)),
             "beacon": float(info.get("reward_beacon_bonus", 0.0)),
         }
@@ -135,6 +171,7 @@ class StagedRewardWrapper(gym.Wrapper):
         cur = self._components(info)
         shaped = (
             self._w["distance"] * (cur["distance"] - self._prev["distance"])
+            + self._w["cube"] * (cur["cube"] - self._prev["cube"])
             + self._w["mineral"] * (cur["mineral"] - self._prev["mineral"])
             + self._w["beacon"] * (cur["beacon"] - self._prev["beacon"])
         )
@@ -176,6 +213,8 @@ def make_staged_env(
     flip_penalty: float = 50.0,
     frame_skip: int = 1,
     power_capacity: Optional[float] = None,
+    cube_spawn_lambda: Optional[float] = None,
+    cube_spawn_extent: Optional[float] = None,
 ) -> gym.Env:
     """Construct a `RoverEnv` configured for `stage` and wrap its reward.
 
@@ -192,16 +231,30 @@ def make_staged_env(
     `power_capacity` (Wh) defaults to `DEFAULT_POWER_CAPACITY_WH` so the
     battery binds within an episode; pass a larger value (e.g. 1000 for
     the game's battery) to loosen it.
+
+    `cube_spawn_lambda` / `cube_spawn_extent` default to the game's values
+    for `locomotion` (unchanged behavior, so the committed `locomotion`
+    model bundle stays a valid warm-start base) and to
+    `DEFAULT_CUBE_SPAWN_LAMBDA` / `DEFAULT_CUBE_SPAWN_EXTENT` from
+    `power_cubes` onward, matching how the `cube` reward weight is carried
+    forward — pass explicit values to override either.
     """
     if stage not in STAGE_WEIGHTS:
         raise ValueError(f"unknown stage {stage!r}; choose from {STAGES}")
     if power_capacity is None:
         power_capacity = DEFAULT_POWER_CAPACITY_WH
+    if stage != "locomotion":
+        if cube_spawn_lambda is None:
+            cube_spawn_lambda = DEFAULT_CUBE_SPAWN_LAMBDA
+        if cube_spawn_extent is None:
+            cube_spawn_extent = DEFAULT_CUBE_SPAWN_EXTENT
     env: gym.Env = RoverEnv(
         seed=seed,
         max_steps=max_steps,
         beacons_enabled=(stage == "full"),
         power_capacity=power_capacity,
+        cube_spawn_lambda=cube_spawn_lambda,
+        cube_spawn_extent=cube_spawn_extent,
     )
     if frame_skip > 1:
         env = ActionRepeat(env, frame_skip)

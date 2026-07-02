@@ -48,6 +48,8 @@ class RoverEnv(gym.Env):
         render_mode: Optional[str] = None,
         beacons_enabled: bool = True,
         power_capacity: Optional[float] = None,
+        cube_spawn_lambda: Optional[float] = None,
+        cube_spawn_extent: Optional[float] = None,
     ) -> None:
         super().__init__()
         if render_mode is not None and render_mode != "rgb_array":
@@ -68,12 +70,20 @@ class RoverEnv(gym.Env):
         # Training passes a small value so the power budget binds within
         # one episode. The battery refills on every reset().
         self.power_capacity = power_capacity
+        # Power-cube Poisson spawn rate (cubes/sec) / spawn region
+        # half-width (m); None keeps the game's defaults. The power_cubes
+        # curriculum stage raises the rate and shrinks the region so a
+        # short episode has enough reachable cubes to learn seek behavior.
+        self.cube_spawn_lambda = cube_spawn_lambda
+        self.cube_spawn_extent = cube_spawn_extent
 
         self._env = _RustRoverEnv(
             seed=seed,
             max_steps=max_steps,
             beacons_enabled=beacons_enabled,
             power_capacity=power_capacity,
+            cube_spawn_lambda=cube_spawn_lambda,
+            cube_spawn_extent=cube_spawn_extent,
         )
         self._obs_dim = _RustRoverEnv.obs_dim()
         self._action_count = _RustRoverEnv.action_count()

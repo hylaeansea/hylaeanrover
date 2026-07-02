@@ -15,7 +15,7 @@ models/<stage>/
 └── model.norm.json  obs stats + frame-skip for the autopilot
 ```
 
-`<stage>` is one of `locomotion`, `minerals`, `full`.
+`<stage>` is one of `locomotion`, `power_cubes`, `minerals`, `full`.
 
 ## Promoting a run into here
 
@@ -38,9 +38,9 @@ Resume training from the stage's best (e.g. continue locomotion, or warm-
 start the next stage):
 
 ```bash
-python examples/train.py --stage minerals --timesteps 1000000 \
+python examples/train.py --stage power_cubes --timesteps 1000000 \
     --load models/locomotion/model.zip --vecnorm models/locomotion/vecnorm.pkl \
-    --save runs/minerals
+    --save runs/power_cubes
 ```
 
 Evaluate it:
