@@ -217,25 +217,31 @@ game-over never fires (see Staged training, above).
 
 ## Observation space
 
-`Box(low=-inf, high=+inf, shape=(42,), dtype=float32)`. The vector is
+`Box(low=-inf, high=+inf, shape=(41,), dtype=float32)`. The vector is
 the in-game JSON telemetry, flattened. Slot ranges (matches
-`crates/hylaeanrover_py/src/lib.rs::observation`):
+`crates/hylaeanrover_core/src/observation.rs`):
 
 | slot | length | content |
 |-----:|-------:|---------|
 | 0..7 | 7 | speed, heading, pitch, roll, yaw rate, accel fwd, accel lat |
 | 7..15 | 8 | lidar fan, meters (200 = no hit) |
 | 15..33 | 18 | 6 visible cubes × (bearing, range, valid_flag) |
-| 33..35 | 2 | power normalized 0..1, power Wh |
-| 35..41 | 6 | mineral concentrations under the rover (Si, Al, Fe, Ti, H2O, He-3) |
-| 41..42 | 1 | beacons remaining |
+| 33..34 | 1 | power remaining, fraction of capacity 0..1 |
+| 34..40 | 6 | mineral concentrations under the rover (Si, Al, Fe, Ti, H2O, He-3) |
+| 40..41 | 1 | beacons remaining |
+
+Power is exposed only as a fraction of capacity (no raw Wh slot) so the
+observation is invariant to the configured battery size — a policy
+trained on the RL env's small battery (`power_capacity`, see
+`hylaeanrover.wrappers.DEFAULT_POWER_CAPACITY_WH`) reads the same
+signal when driving the game's 1 kWh battery via the in-game autopilot.
 
 The cumulative reward breakdown and the game-over flag are deliberately
 **not** in the observation: the reward components grow unbounded within
 an episode and are non-Markovian (bad policy inputs), and the game-over
 flag is always 0 on the steps the agent acts on. The full per-component
 reward is still available in the `info` dict (see Reward, below) for
-shaping and logging. Keeping the observation shape fixed at 42 lets a
+shaping and logging. Keeping the observation shape fixed at 41 lets a
 policy trained on one curriculum stage transfer cleanly to the next.
 
 ## Reward

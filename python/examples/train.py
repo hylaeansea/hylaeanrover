@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import os
+from collections import Counter
 
 import numpy as np
 from stable_baselines3 import PPO
@@ -33,7 +34,12 @@ from stable_baselines3.common.running_mean_std import RunningMeanStd
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize
 
 import hylaeanrover
-from hylaeanrover.wrappers import STAGES, make_staged_env, resolve_vecnorm
+from hylaeanrover.wrappers import (
+    DEFAULT_POWER_CAPACITY_WH,
+    STAGES,
+    make_staged_env,
+    resolve_vecnorm,
+)
 
 
 class SaveBestVecNormalize(BaseCallback):
@@ -57,18 +63,81 @@ class SaveBestVecNormalize(BaseCallback):
         return True
 
 
-def _env_thunk(stage: str, seed: int, max_steps: int, frame_skip: int):
+class EpisodeOutcomeCallback(BaseCallback):
+    """Log how episodes end, per rollout, to TensorBoard.
+
+    Environment-driven failures look exactly like RL instability in the
+    default SB3 metrics (ep_rew_mean tanks, ep_len_mean shrinks) — the
+    battery-never-reset bug ran for weeks disguised as "PPO collapse".
+    Terminal-reason fractions make the difference visible immediately:
+
+      episodes/frac_time_limit    ended by truncation (ran the clock out)
+      episodes/frac_out_of_power  battery died, rover came to rest
+      episodes/frac_flipped       tipped past the flip angle at rest
+      episodes/end_power_frac     mean battery fraction left at episode
+                                  end — how hard the power budget binds
+    """
+
+    _REASONS = ("time_limit", "out_of_power", "flipped", "beacons_deployed", "other")
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._counts: Counter[str] = Counter()
+        self._end_power: list[float] = []
+
+    def _on_step(self) -> bool:
+        for done, info in zip(self.locals["dones"], self.locals["infos"]):
+            if not done:
+                continue
+            reason = info.get("game_over")
+            if reason is None:
+                reason = (
+                    "time_limit" if info.get("TimeLimit.truncated", False) else "other"
+                )
+            self._counts[reason if reason in self._REASONS else "other"] += 1
+            if "power_frac" in info:
+                self._end_power.append(float(info["power_frac"]))
+        return True
+
+    def _on_rollout_end(self) -> None:
+        total = sum(self._counts.values())
+        if total == 0:
+            return
+        for reason in self._REASONS:
+            self.logger.record(f"episodes/frac_{reason}", self._counts[reason] / total)
+        if self._end_power:
+            self.logger.record(
+                "episodes/end_power_frac", float(np.mean(self._end_power))
+            )
+        self._counts.clear()
+        self._end_power.clear()
+
+
+def _env_thunk(stage: str, seed: int, max_steps: int, frame_skip: int, power_capacity: float):
     """Picklable factory (no late-binding closure) for one Monitor-wrapped env."""
 
     def _make():
         return Monitor(
-            make_staged_env(stage, seed=seed, max_steps=max_steps, frame_skip=frame_skip)
+            make_staged_env(
+                stage,
+                seed=seed,
+                max_steps=max_steps,
+                frame_skip=frame_skip,
+                power_capacity=power_capacity,
+            )
         )
 
     return _make
 
 
-def _make_vec_env(stage: str, base_seed: int, max_steps: int, frame_skip: int, n_envs: int):
+def _make_vec_env(
+    stage: str,
+    base_seed: int,
+    max_steps: int,
+    frame_skip: int,
+    n_envs: int,
+    power_capacity: float,
+):
     """Vectorized env for the given stage.
 
     `n_envs == 1` uses `DummyVecEnv` (no process overhead). `n_envs > 1`
@@ -78,7 +147,10 @@ def _make_vec_env(stage: str, base_seed: int, max_steps: int, frame_skip: int, n
     different terrain. `start_method="spawn"` is required: forking after
     Bevy has spawned its task-pool threads is unsafe.
     """
-    fns = [_env_thunk(stage, base_seed + i, max_steps, frame_skip) for i in range(n_envs)]
+    fns = [
+        _env_thunk(stage, base_seed + i, max_steps, frame_skip, power_capacity)
+        for i in range(n_envs)
+    ]
     if n_envs == 1:
         return DummyVecEnv(fns)
     return SubprocVecEnv(fns, start_method="spawn")
@@ -111,6 +183,11 @@ def main() -> None:
                    help="entropy bonus; >0 (e.g. 0.01) keeps exploration alive to resist collapse")
     p.add_argument("--target-kl", type=float, default=None,
                    help="early-stop a rollout's epochs once approx_kl exceeds this (e.g. 0.02)")
+    p.add_argument("--power-capacity", type=float, default=DEFAULT_POWER_CAPACITY_WH,
+                   help="battery capacity in Wh per episode (refilled on reset). The "
+                        "default binds within an episode so power management is part "
+                        "of the learned behavior; keep it consistent across curriculum "
+                        "stages, like --frame-skip. The game battery is 1000.")
     args = p.parse_args()
 
     os.makedirs(args.save, exist_ok=True)
@@ -122,7 +199,10 @@ def main() -> None:
     vecnorm_path = resolve_vecnorm(args.load, args.vecnorm) if args.load else args.vecnorm
 
     # --- Training env, normalized -----------------------------------------
-    base = _make_vec_env(args.stage, args.seed, args.max_steps, args.frame_skip, args.n_envs)
+    base = _make_vec_env(
+        args.stage, args.seed, args.max_steps, args.frame_skip, args.n_envs,
+        args.power_capacity,
+    )
     if vecnorm_path:
         # Carry the observation normalization stats forward (obs
         # distribution is stable across stages) but reset the reward
@@ -138,7 +218,10 @@ def main() -> None:
 
     # --- Eval env (separate, single process; EvalCallback syncs obs stats) -
     eval_venv = VecNormalize(
-        _make_vec_env(args.stage, args.seed + 1000, args.max_steps, args.frame_skip, 1),
+        _make_vec_env(
+            args.stage, args.seed + 1000, args.max_steps, args.frame_skip, 1,
+            args.power_capacity,
+        ),
         norm_obs=True,
         norm_reward=False,
         training=False,
@@ -172,9 +255,11 @@ def main() -> None:
         f"PPO: n_epochs={args.n_epochs} ent_coef={args.ent_coef} "
         f"target_kl={args.target_kl}"
     )
+    print(f"env: power_capacity={args.power_capacity} Wh, frame_skip={args.frame_skip}")
     print(f"env binary: {hylaeanrover._native.__file__}")
 
     callbacks = [
+        EpisodeOutcomeCallback(),
         CheckpointCallback(
             save_freq=args.checkpoint_freq,
             save_path=os.path.join(args.save, "checkpoints"),

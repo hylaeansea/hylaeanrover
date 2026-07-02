@@ -44,6 +44,11 @@ pub struct RoverCoreConfig {
     /// inert no-op (keeping the action space `Discrete(10)` fixed across
     /// stages) instead of silently ending the episode after 5 presses.
     pub beacons_enabled: bool,
+    /// Battery capacity in Wh for a fresh run. The game keeps the
+    /// 1 kWh default; the RL env shrinks it so the power budget binds
+    /// within a single episode and power management becomes part of
+    /// the learned behavior.
+    pub power_capacity_wh: f32,
 }
 
 impl Default for RoverCoreConfig {
@@ -52,6 +57,7 @@ impl Default for RoverCoreConfig {
             spawn_mode: RoverSpawnMode::Gltf,
             with_ui: true,
             beacons_enabled: true,
+            power_capacity_wh: power_cubes::POWER_MAX,
         }
     }
 }
@@ -62,6 +68,7 @@ impl RoverCoreConfig {
             spawn_mode: RoverSpawnMode::Primitives,
             with_ui: false,
             beacons_enabled: true,
+            power_capacity_wh: power_cubes::POWER_MAX,
         }
     }
 }
@@ -110,7 +117,9 @@ impl Plugin for RoverCorePlugin {
         // Game logic — all of these are headless-safe (UI is gated on
         // UiFont presence inside each plugin).
         app.add_plugins(terrain_controls::TerrainControlsPlugin)
-            .add_plugins(power_cubes::PowerCubesPlugin)
+            .add_plugins(power_cubes::PowerCubesPlugin {
+                capacity_wh: self.0.power_capacity_wh,
+            })
             .add_plugins(beacons::BeaconsPlugin)
             .add_plugins(minerals::MineralsPlugin)
             .add_plugins(imu::ImuPlugin)

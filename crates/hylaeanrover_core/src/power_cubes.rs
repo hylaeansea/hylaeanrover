@@ -31,8 +31,10 @@ const SPAWN_HEIGHT: f32 = 40.0;
 /// reasonable round-trip range of the origin.
 const SPAWN_EXTENT: f32 = 500.0;
 
-/// Total reserve at startup (Watt-hours). 1 kWh.
-const POWER_MAX: f32 = 1000.0;
+/// Total reserve at startup (Watt-hours). 1 kWh. The game uses this
+/// default; the RL env can shrink it (`PowerCubesPlugin::capacity_wh`)
+/// so power management binds within one episode.
+pub const POWER_MAX: f32 = 1000.0;
 /// Energy consumed per meter of chassis travel (Wh/m).
 const DRAIN_PER_METER: f32 = 0.5;
 /// When the rover is coasting (moving but the player isn't pressing W/S),
@@ -151,25 +153,31 @@ pub struct PowerState {
 
 impl Default for PowerState {
     fn default() -> Self {
-        Self {
-            current: POWER_MAX,
-            max: POWER_MAX,
-            last_chassis_pos: None,
-            pickups_count: 0,
-        }
+        Self::with_capacity(POWER_MAX)
     }
 }
 
 impl PowerState {
+    /// Fresh, full battery of the given capacity (Wh).
+    pub fn with_capacity(capacity_wh: f32) -> Self {
+        Self {
+            current: capacity_wh,
+            max: capacity_wh,
+            last_chassis_pos: None,
+            pickups_count: 0,
+        }
+    }
+
     /// Whether the rover has any energy to spend.
     pub fn has_power(&self) -> bool {
         self.current > 0.0
     }
 }
 
-/// Fired by the Relaunch button when the player is out of power and
-/// wants to start over. `main` listens for this and re-spawns the rover
-/// at the landing pad. Power has already been reset by the time we fire.
+/// Fired by the Relaunch button (and by the RL env's `reset()`) to start
+/// a fresh run. Every per-run piece of state listens for it: rover
+/// respawn, reward, game state, beacons, power cubes, and the battery
+/// (`reset_power_on_relaunch`).
 /// Bevy 0.18 renamed buffered events to "messages" — same semantics as
 /// the old `Event` + `EventReader/Writer`.
 #[derive(Message)]
@@ -177,13 +185,26 @@ pub struct RelaunchEvent;
 
 // ---- Plugin ---------------------------------------------------------------
 
-pub struct PowerCubesPlugin;
+pub struct PowerCubesPlugin {
+    /// Battery capacity (Wh) for a fresh run. The game keeps the
+    /// `POWER_MAX` default; the RL env passes a smaller value so power
+    /// management binds within a single episode.
+    pub capacity_wh: f32,
+}
+
+impl Default for PowerCubesPlugin {
+    fn default() -> Self {
+        Self {
+            capacity_wh: POWER_MAX,
+        }
+    }
+}
 
 impl Plugin for PowerCubesPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<PowerCubeAssets>()
             .init_resource::<PoissonSpawner>()
-            .init_resource::<PowerState>()
+            .insert_resource(PowerState::with_capacity(self.capacity_wh))
             .add_message::<RelaunchEvent>()
             .add_systems(
                 Startup,
@@ -202,6 +223,7 @@ impl Plugin for PowerCubesPlugin {
                 (
                     spawn_power_cubes,
                     despawn_cubes_on_relaunch,
+                    reset_power_on_relaunch,
                     consume_power_from_motion,
                     detect_cube_pickup,
                     advance_charging_cubes,
@@ -434,6 +456,28 @@ fn despawn_cubes_on_relaunch(
     for entity in cubes_q.iter() {
         commands.entity(entity).despawn();
     }
+}
+
+/// Refill the battery on `RelaunchEvent`, mirroring the reward /
+/// game-state / rover resets. This must live here (not in the UI
+/// button handler) because the RL env's `reset()` fires the event
+/// directly — without it, the battery persists across episodes and a
+/// training run's cumulative driving (capacity / DRAIN_PER_METER
+/// meters) eventually kills every env for good.
+///
+/// `last_chassis_pos` is cleared so the respawn teleport doesn't
+/// register as multi-meter drain. `pickups_count` is deliberately
+/// kept: it's tutorial-banner memory ("has the player ever grabbed a
+/// cube"), not run state.
+fn reset_power_on_relaunch(
+    mut events: MessageReader<RelaunchEvent>,
+    mut power: ResMut<PowerState>,
+) {
+    if events.read().count() == 0 {
+        return;
+    }
+    power.current = power.max;
+    power.last_chassis_pos = None;
 }
 
 // ---- Cube pickup ----------------------------------------------------------
@@ -883,12 +927,10 @@ fn update_game_over_visibility(
 
 fn handle_relaunch_button(
     mut q: Query<&Interaction, (Changed<Interaction>, With<RelaunchButton>)>,
-    mut power: ResMut<PowerState>,
     mut writer: MessageWriter<RelaunchEvent>,
 ) {
     for interaction in q.iter_mut() {
         if *interaction == Interaction::Pressed {
-            power.current = power.max;
             writer.write(RelaunchEvent);
         }
     }

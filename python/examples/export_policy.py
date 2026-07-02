@@ -2,7 +2,7 @@
 
 Produces, next to the chosen `.onnx` path:
 
-  * ``<out>.onnx``       — the policy network: obs[1,42] → action logits[1,10]
+  * ``<out>.onnx``       — the policy network: obs[1,41] → action logits[1,10]
   * ``<out>.norm.json``  — VecNormalize obs stats (mean/var/clip) + frame-skip
                            so the game normalizes/replays exactly as training.
 

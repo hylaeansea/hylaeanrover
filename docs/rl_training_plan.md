@@ -1,6 +1,6 @@
 # RL Training Plan — Hylaean Rover
 
-_Last updated: 2026-06-15_
+_Last updated: 2026-07-01_
 
 This document records the plan and the decisions behind how we train an RL
 agent to drive the rover. It is meant to be updated as we make progress.
@@ -57,7 +57,7 @@ is reward annealing / curriculum learning — nothing is discarded.
 | First milestone | Staged curriculum, starting with locomotion | Dense signal first; transfer weights forward so nothing is wasted |
 | Change scope | Python harness + small Rust knobs | Keep Rust changes minimal and one-time; iterate reward shaping in Python |
 | Scaling | Single env, CPU, ~1–2M steps/stage | Prove learning before optimizing throughput |
-| Observation | Freeze at 42 dims (trim slots 41–46) | Unbounded/non-Markovian inputs removed; fixed shape enables transfer |
+| Observation | Freeze at 42 dims (trim slots 41–46); later cut to 41 (raw-Wh power slot dropped, see 2026-07-01 log) | Unbounded/non-Markovian inputs removed; fixed shape enables transfer |
 | Action space | Freeze `Discrete(10)` across all stages | Fixed output head enables transfer; gate beacons via a knob |
 
 ## The staging design (decisions fixed up front, once)
@@ -213,7 +213,7 @@ latest checkpoint and pressing O.
 
 How it works: the policy runs natively in the Rust game via
 `tract-onnx` (pure Rust, no Python in the loop). Each frame the game
-builds the *same* 42-dim observation the env uses
+builds the *same* 41-dim observation the env uses
 (`hylaeanrover_core::observation::build_observation`, shared by both),
 normalizes it with the exported stats, runs the network, and argmaxes
 the logits into a `RoverAction`. Files:
@@ -287,3 +287,39 @@ mid-training via the O key.
     previously `best/` had no matching vecnorm.
   - Verified: best/ now contains best_model.zip + vecnorm.pkl; promote
     produces all four files; refactored export still works.
+- 2026-07-01 — Root-caused the ~200k-step "policy collapse": the battery
+  was never reset between episodes. `RelaunchEvent` reset reward, game
+  state, beacons, cubes, and the rover — but power was only refilled by
+  the UI Relaunch button, which the RL env's `reset()` bypasses. Each
+  training process therefore had one 1 kWh battery for its whole life
+  (~2000 m of driving at 0.5 Wh/m); once a policy's cumulative distance
+  crossed that, every episode started dead (throttle no-op, ~7.7 reward
+  from spawn-settle, out_of_power after the 5 s at-rest gate) and no PPO
+  knob could recover it. Better policies died sooner — the "climbs then
+  collapses" pattern was environmental, not optimizer instability.
+  - Rust: `reset_power_on_relaunch` in `power_cubes.rs` refills the
+    battery on `RelaunchEvent` (button handler no longer does it
+    manually); env `reset()` also clears the previous episode's
+    `RoverAction` so stale throttle can't drain the fresh battery during
+    settle frames.
+  - Power management is now part of the curriculum: battery capacity is
+    configurable (`RoverCoreConfig.power_capacity_wh`, `RoverEnv
+    power_capacity=`, `train.py`/`evaluate.py --power-capacity`).
+    Training defaults to `wrappers.DEFAULT_POWER_CAPACITY_WH = 100` Wh —
+    measured: a flat-out 2000-tick episode covers ~320 m and costs
+    ~158 Wh, so 100 Wh dies ~63% in and caps naive driving at ~230 m;
+    pacing + regen braking extend it. Same value should be used across
+    all stages (like frame-skip). The game keeps 1 kWh.
+  - Observation is now 41 dims: dropped the raw-Wh power slot, keeping
+    the 0..1 fraction, so the obs is capacity-invariant and a policy
+    trained on the small battery transfers to the game's 1 kWh
+    autopilot. Old checkpoints/vecnorm stats are incompatible (they were
+    trained under the battery bug anyway).
+  - `train.py` logs episode outcomes per rollout to TensorBoard
+    (`episodes/frac_time_limit|out_of_power|flipped|...` and
+    `episodes/end_power_frac` via `EpisodeOutcomeCallback` on the new
+    `info["power_frac"]`), so env-driven failures no longer masquerade
+    as RL instability.
+  - Verified: battery refills across resets (obs slot 33 back to 1.0),
+    out-of-power binds mid-episode at 100 Wh, smoke PPO run logs the new
+    metrics end-to-end.
