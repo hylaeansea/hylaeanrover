@@ -16,6 +16,7 @@ from hylaeanrover.wrappers import (
 class StageHardeningPresetTests(unittest.TestCase):
     def test_named_presets_cover_dense_sparse_and_no_cube_controls(self) -> None:
         self.assertGreater(CUBE_SPAWN_PRESETS["dense_training"]["lambda"], 1.0)
+        self.assertEqual(CUBE_SPAWN_PRESETS["transition"]["lambda"], 0.30)
         self.assertEqual(CUBE_SPAWN_PRESETS["sparse_game"]["lambda"], 0.05)
         self.assertEqual(CUBE_SPAWN_PRESETS["none"]["lambda"], 0.0)
         self.assertIn("power_efficiency", LOCOMOTION_SHAPING_MODES)

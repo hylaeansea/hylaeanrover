@@ -119,6 +119,7 @@ TERRAIN_HEIGHT_PRESETS: dict[
 
 EVAL_SCENARIOS: dict[str, dict[str, Any]] = {
     "dense_training": {"cube_spawn_preset": "dense_training"},
+    "transition": {"cube_spawn_preset": "transition"},
     "sparse_game": {"cube_spawn_preset": "sparse_game"},
     "low_power_start": {
         "cube_spawn_preset": "transition",
