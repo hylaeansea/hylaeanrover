@@ -136,7 +136,7 @@ File: `python/README.md` — update the obs table (47 → 42).
 Dir: `python/` (add extras as needed: `tensorboard`).
 
 - `python/hylaeanrover/wrappers.py` — `StagedRewardWrapper(gym.Wrapper)`:
-  takes `stage` ∈ {`locomotion`, `minerals`, `full`}, recomputes `reward`
+  takes `stage` ∈ {`locomotion`, `power_cubes`, `minerals`, `full`}, recomputes `reward`
   each step from info-field deltas (`reward_distance`,
   `reward_mineral_integral`, `reward_beacon_bonus`), adds a small flip
   penalty when `info["game_over"] == "flipped"`. For `locomotion`/`minerals`
@@ -149,13 +149,16 @@ Dir: `python/` (add extras as needed: `tensorboard`).
   CLI: `--stage`, `--timesteps` (default ~1e6–2e6), `--load <prev .zip>`,
   `--vecnorm <prev .pkl>`, `--save <dir>`.
   **Transfer handling on `--load`:** load PPO weights and **carry the obs
-  normalization stats** (load the saved `VecNormalize`, keep its `obs_rms`)
-  but **reset reward normalization** (`ret_rms`) at each stage boundary,
-  since reward scale jumps between stages.
+  normalization stats** (load the saved `VecNormalize`, keep its `obs_rms`).
+  Reset reward normalization (`ret_rms`) at each stage boundary because reward
+  scale jumps between stages; preserve it for same-stage continuation. The
+  trainer auto-detects obvious path names, and `--reset-reward-stats` /
+  `--preserve-reward-stats` make the choice explicit.
 - `python/examples/evaluate.py` — run **random baseline vs trained** over N
   episodes, report mean episode return, mean length, flip-rate,
-  out-of-power-rate, and (Stage 2) beacons used / beacon bonus. This is how
-  we decide a stage actually learned before advancing.
+  out-of-power-rate, end power, low-power distance, visible-cube approach
+  rate, pickups, and beacons used / beacon bonus. This is how we decide a
+  stage actually learned before advancing.
 
 ## Why no training time is wasted
 
@@ -164,17 +167,19 @@ Dir: `python/` (add extras as needed: `tensorboard`).
 - Each stage starts from a policy that already solves the previous stage's
   sub-skill, so gradient updates target only the incremental objective.
 - VecNormalize obs stats carry over (obs distribution is stable across
-  stages); only reward stats reset.
+  stages). Reward stats reset across stage boundaries and are preserved for
+  same-stage continuation.
 
 ## Go / no-go gates (don't advance until met)
 
 - **Stage 0 → 1:** trained mean episode distance clearly beats the random
   baseline and flip-rate drops (e.g. distance ≳ 2–3× random, flip-rate
   trending down) over an eval batch.
-- **Stage 1 → 2:** mean cube-pickup bonus (and/or pickups/episode) per
-  episode clearly exceeds a distance-only Stage 0 policy evaluated under
-  the Stage 1 reward (near-zero, since it has no seek incentive), and/or
-  mean end-of-episode power fraction rises relative to Stage 0.
+- **Stage 1 → 2:** do not advance until the hardening gates in
+  `docs/rl_stage0_stage1_hardening_plan.md` pass. The `power_cubes`
+  policy must beat the promoted locomotion policy on pickups, end power,
+  low-power behavior, and out-of-power rate across dense, transition,
+  sparse-game, low-power, visible-cube, and no-cube-control scenarios.
 - **Stage 2 → 3:** mineral-integral component per episode beats a
   Stage 1 policy evaluated under the Stage 2 reward, without the
   cube-pickup rate regressing badly from Stage 1.
@@ -190,8 +195,9 @@ Dir: `python/` (add extras as needed: `tensorboard`).
 3. `python examples/evaluate.py --random` — record baseline metrics.
 4. `python examples/train.py --stage locomotion --timesteps 1000000 --save runs/stage0`
    then `evaluate.py --load runs/stage0` — confirm Stage 0 gate.
-5. `train.py --stage minerals --load runs/stage0/model.zip --vecnorm runs/stage0/vecnorm.pkl --save runs/stage1`
-   → evaluate → gate. Repeat for `--stage full` from Stage 1.
+5. `train.py --stage power_cubes --load runs/stage0/model.zip --vecnorm runs/stage0/vecnorm.pkl --reset-reward-stats --save runs/stage1`
+   → evaluate against `docs/rl_stage0_stage1_hardening_plan.md` gates.
+   Only after those pass, repeat for `--stage minerals` and `--stage full`.
 6. Watch `tensorboard --logdir runs/` for `rollout/ep_rew_mean` and
    `ep_len_mean` rising.
 
@@ -216,6 +222,7 @@ and run the game with `--policy`:
 # 1. Export the trained policy to ONNX (+ a .norm.json with the
 #    VecNormalize obs stats) for the in-game runtime.
 python examples/export_policy.py \
+    --stage locomotion \
     --model runs/stage0/model.zip --vecnorm runs/stage0/vecnorm.pkl
 
 # 2. Watch it in the real game.
@@ -406,3 +413,11 @@ mid-training via the O key.
     fields land in `.norm.json` (and the cube-spawn fields don't);
     launched the game with a `power_cubes` `.norm.json` and confirmed the
     startup log shows `beacons_enabled=false, power_capacity_wh=100`.
+- 2026-07-02 — Stage 0/1 hardening gate added before minerals:
+  - New plan: `docs/rl_stage0_stage1_hardening_plan.md`.
+  - Rust/Python now expose terrain height scale, reset-time power start
+    fraction, seeded cube spawning, named cube spawn presets, named
+    horizons, low-power Stage 1 shaping, and acceptance metrics for
+    low-power visible-cube behavior.
+  - `export_policy.py --stage` is required so non-full exports do not
+    accidentally write full-stage runtime config.

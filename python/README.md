@@ -90,21 +90,28 @@ design. In short:
 ```bash
 # Stage 0 — locomotion (drive far, stay upright)
 python examples/evaluate.py --stage locomotion --random      # baseline
-python examples/train.py --stage locomotion --timesteps 1000000 --save runs/stage0
+python examples/train.py --stage locomotion --timesteps 1000000 \
+    --scenario terrain_mixed_1_2 --save runs/stage0
 python examples/evaluate.py --stage locomotion --load runs/stage0/model.zip \
     --vecnorm runs/stage0/vecnorm.pkl
 
 # Stage 1 — power cubes (seek + collect, warm-started from stage 0)
 python examples/train.py --stage power_cubes --timesteps 1000000 \
-    --load runs/stage0/model.zip --vecnorm runs/stage0/vecnorm.pkl --save runs/stage1
+    --load runs/stage0/model.zip --vecnorm runs/stage0/vecnorm.pkl \
+    --reset-reward-stats \
+    --scenario dense_training \
+    --extra-eval-scenarios transition,sparse_game,low_power_start,cube_visible_low_power \
+    --save runs/stage1
 
 # Stage 2 — drive + minerals (warm-started from stage 1)
 python examples/train.py --stage minerals --timesteps 1000000 \
-    --load runs/stage1/model.zip --vecnorm runs/stage1/vecnorm.pkl --save runs/stage2
+    --load runs/stage1/model.zip --vecnorm runs/stage1/vecnorm.pkl \
+    --reset-reward-stats --save runs/stage2
 
 # Stage 3 — full mission incl. beacons (warm-started from stage 2)
 python examples/train.py --stage full --timesteps 1000000 \
-    --load runs/stage2/model.zip --vecnorm runs/stage2/vecnorm.pkl --save runs/stage3
+    --load runs/stage2/model.zip --vecnorm runs/stage2/vecnorm.pkl \
+    --reset-reward-stats --save runs/stage3
 
 tensorboard --logdir runs/
 ```
@@ -121,6 +128,31 @@ own sparse, periodic spawn rate, and the exported autopilot bundle
 deliberately does not carry the training density over ("train dense,
 deploy sparse"). The reward shaping lives in
 `hylaeanrover.wrappers.StagedRewardWrapper`.
+
+Before moving from `power_cubes` to `minerals`, run the Stage 0/1 gates
+in [`../docs/rl_stage0_stage1_hardening_plan.md`](../docs/rl_stage0_stage1_hardening_plan.md).
+The key scenario knobs are:
+
+- `--scenario`: named eval/train presets such as `dense_training`,
+  `transition`, `sparse_game`, `low_power_start`,
+  `cube_visible_low_power`, and `no_cube_control`.
+- `--horizon`: `short` (2000), `medium` (7200), or `long` (21600)
+  physics ticks.
+- `--terrain-height`: fixed value, `min:max` range, or preset such as
+  `mixed_1_2`.
+- `--cube-spawn-preset`: `dense_training`, `transition`,
+  `sparse_game`, or `none`.
+- `--power-start-fraction`: starts an episode with a partial battery for
+  low-power checks.
+- `--locomotion-shaping`: `power_efficiency` adds Stage 0 pacing
+  shaping so coasting/regen is learnable before the power-cube stage.
+- `--locomotion-coast-bonus`, `--locomotion-power-draw-penalty`,
+  `--locomotion-power-recovery-reward`, and
+  `--locomotion-out-of-power-penalty`: tune Stage 0 pacing pressure when
+  the policy plateaus as an out-of-power sprint.
+- `--reset-reward-stats` / `--preserve-reward-stats`: reset reward
+  normalization for stage transitions, preserve it for same-stage
+  continuation.
 
 ### Speeding up training
 
@@ -165,6 +197,7 @@ overlays, camera — no Python in the loop):
 
 ```bash
 python examples/export_policy.py \
+    --stage locomotion \
     --model runs/stage0/model.zip --vecnorm runs/stage0/vecnorm.pkl
 cargo run -p hylaeanrover_game --release -- --policy runs/stage0/model.onnx
 ```
@@ -196,12 +229,15 @@ Then everything just points at the bundle:
 # resume / warm-start the next stage from the stage's best
 python examples/train.py --stage power_cubes --timesteps 1000000 \
     --load models/locomotion/model.zip --vecnorm models/locomotion/vecnorm.pkl \
+    --reset-reward-stats \
     --save runs/power_cubes
 # watch the best
 cargo run -p hylaeanrover_game --release -- --policy models/locomotion/model.onnx
 ```
 
 See [`../models/README.md`](../models/README.md) for the bundle layout.
+For a command-first walkthrough from no models through a promoted full
+policy, use [`TRAINING_GUIDE.md`](TRAINING_GUIDE.md).
 
 ## Action space
 

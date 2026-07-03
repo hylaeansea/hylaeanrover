@@ -19,7 +19,7 @@ use bevy_rapier3d::prelude::*;
 use crate::game_state::{GameState, GameStatus};
 use crate::reward::RewardState;
 use crate::ui::{LeftSidebar, LeftSidebarSet, UiFont};
-use rand::Rng;
+use rand::{Rng, SeedableRng, rngs::StdRng};
 
 use crate::ChassisEntity;
 use crate::terrain_controls::TerrainState;
@@ -189,6 +189,30 @@ impl PoissonSpawner {
     }
 }
 
+#[derive(Resource)]
+pub struct PowerCubeRng {
+    seed: u64,
+    rng: StdRng,
+}
+
+impl PowerCubeRng {
+    pub fn from_seed(seed: u64) -> Self {
+        Self {
+            seed,
+            rng: StdRng::seed_from_u64(seed),
+        }
+    }
+
+    pub fn reseed(&mut self, seed: u64) {
+        self.seed = seed;
+        self.rng = StdRng::seed_from_u64(seed);
+    }
+
+    pub fn seed(&self) -> u64 {
+        self.seed
+    }
+}
+
 /// Half-width (m) of the square region cubes may spawn within, overridable
 /// per stage — see `PowerCubesPlugin::spawn_extent`.
 #[derive(Resource)]
@@ -205,6 +229,8 @@ pub struct PowerState {
     /// tutorial banner to dismiss itself after the player has clearly
     /// figured the mechanic out.
     pub pickups_count: u32,
+    /// Cubes absorbed since the last relaunch/reset.
+    pub episode_pickups_count: u32,
 }
 
 impl Default for PowerState {
@@ -221,12 +247,19 @@ impl PowerState {
             max: capacity_wh,
             last_chassis_pos: None,
             pickups_count: 0,
+            episode_pickups_count: 0,
         }
     }
 
     /// Whether the rover has any energy to spend.
     pub fn has_power(&self) -> bool {
         self.current > 0.0
+    }
+
+    /// Set the current reserve to a fraction of capacity.
+    pub fn set_fraction(&mut self, fraction: f32) {
+        self.current = self.max * fraction.clamp(0.0, 1.0);
+        self.last_chassis_pos = None;
     }
 }
 
@@ -254,6 +287,8 @@ pub struct PowerCubesPlugin {
     /// stages keep `SPAWN_EXTENT`; the `power_cubes` stage shrinks it so
     /// denser cubes are also reachable within one episode.
     pub spawn_extent: f32,
+    /// Seed for deterministic cube spawn timing/placement.
+    pub rng_seed: u64,
 }
 
 impl Default for PowerCubesPlugin {
@@ -262,6 +297,7 @@ impl Default for PowerCubesPlugin {
             capacity_wh: POWER_MAX,
             spawn_lambda: SPAWN_LAMBDA,
             spawn_extent: SPAWN_EXTENT,
+            rng_seed: 42,
         }
     }
 }
@@ -271,6 +307,7 @@ impl Plugin for PowerCubesPlugin {
         app.init_resource::<PowerCubeAssets>()
             .insert_resource(PoissonSpawner::with_lambda(self.spawn_lambda))
             .insert_resource(CubeSpawnExtent(self.spawn_extent))
+            .insert_resource(PowerCubeRng::from_seed(self.rng_seed))
             .insert_resource(PowerState::with_capacity(self.capacity_wh))
             .add_message::<RelaunchEvent>()
             .add_systems(
@@ -290,6 +327,7 @@ impl Plugin for PowerCubesPlugin {
                 (
                     spawn_power_cubes,
                     despawn_cubes_on_relaunch,
+                    reset_spawner_on_relaunch,
                     reset_power_on_relaunch,
                     consume_power_from_motion,
                     detect_cube_pickup,
@@ -393,6 +431,7 @@ fn spawn_power_cubes(
     mut commands: Commands,
     time: Res<Time>,
     mut spawner: ResMut<PoissonSpawner>,
+    mut cube_rng: ResMut<PowerCubeRng>,
     extent: Res<CubeSpawnExtent>,
     assets: Res<PowerCubeAssets>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -401,6 +440,9 @@ fn spawn_power_cubes(
     chassis_q: Query<&GlobalTransform>,
     existing_cubes: Query<Entity, With<PowerCube>>,
 ) {
+    if spawner.lambda <= 0.0 {
+        return;
+    }
     spawner.time_to_next -= time.delta_secs();
     if spawner.time_to_next > 0.0 {
         return;
@@ -410,7 +452,7 @@ fn spawn_power_cubes(
     // ends up skipped below (at the cap) — otherwise a capped-out world
     // would retry every single frame instead of waiting out a normal
     // Poisson interval.
-    let mut rng = rand::thread_rng();
+    let rng = &mut cube_rng.rng;
     let u: f32 = rng.gen_range(f32::EPSILON..1.0_f32);
     spawner.time_to_next = -u.ln() / spawner.lambda;
 
@@ -570,6 +612,16 @@ fn despawn_cubes_on_relaunch(
     }
 }
 
+fn reset_spawner_on_relaunch(
+    mut events: MessageReader<RelaunchEvent>,
+    mut spawner: ResMut<PoissonSpawner>,
+) {
+    if events.read().count() == 0 {
+        return;
+    }
+    spawner.time_to_next = 1.0;
+}
+
 /// Refill the battery on `RelaunchEvent`, mirroring the reward /
 /// game-state / rover resets. This must live here (not in the UI
 /// button handler) because the RL env's `reset()` fires the event
@@ -590,6 +642,7 @@ fn reset_power_on_relaunch(
     }
     power.current = power.max;
     power.last_chassis_pos = None;
+    power.episode_pickups_count = 0;
 }
 
 /// Breathe idle cubes' emissive up and down so they catch the eye even
@@ -688,6 +741,7 @@ fn advance_charging_cubes(
         if charging.progress >= 1.0 {
             power.current = (power.current + CUBE_VALUE).min(power.max);
             power.pickups_count = power.pickups_count.saturating_add(1);
+            power.episode_pickups_count = power.episode_pickups_count.saturating_add(1);
             commands.entity(entity).despawn();
         }
     }
@@ -1080,5 +1134,35 @@ fn handle_relaunch_button(
         if *interaction == Interaction::Pressed {
             writer.write(RelaunchEvent);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn power_fraction_is_clamped_and_clears_last_position() {
+        let mut power = PowerState::with_capacity(100.0);
+        power.last_chassis_pos = Some(Vec3::new(1.0, 2.0, 3.0));
+        power.set_fraction(0.25);
+        assert_eq!(power.current, 25.0);
+        assert!(power.last_chassis_pos.is_none());
+
+        power.set_fraction(2.0);
+        assert_eq!(power.current, 100.0);
+
+        power.set_fraction(-1.0);
+        assert_eq!(power.current, 0.0);
+    }
+
+    #[test]
+    fn cube_rng_reseed_replays_sequence() {
+        let mut rng = PowerCubeRng::from_seed(7);
+        let a: f32 = rng.rng.gen_range(0.0..1.0);
+        rng.reseed(7);
+        let b: f32 = rng.rng.gen_range(0.0..1.0);
+        assert_eq!(a, b);
+        assert_eq!(rng.seed(), 7);
     }
 }

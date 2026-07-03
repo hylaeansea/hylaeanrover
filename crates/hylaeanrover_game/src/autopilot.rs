@@ -139,8 +139,8 @@ fn norm_path_for(onnx_path: &Path) -> PathBuf {
 /// those calibrate a Poisson spawn *rate* for a bounded ~33s training
 /// episode that gets fully wiped on every `RelaunchEvent`. The game has
 /// no such episode boundary — the autopilot just keeps driving
-/// indefinitely — so applying a training-dense rate (e.g. `power_cubes`'s
-/// 3.5/s) to an unbounded session piles up cubes without limit the
+/// indefinitely — so applying a training-dense rate to an unbounded
+/// session piles up cubes without limit the
 /// longer you watch, instead of settling at a steady state. Battery size
 /// and the beacon toggle don't have that failure mode (fixed capacity /
 /// a simple boolean), so they're safe to carry over; a spawn *rate*

@@ -28,7 +28,7 @@ Produces two files next to the chosen `.onnx` path:
                           episode that gets fully wiped on every reset.
                           The game has no such episode boundary, so
                           applying a training-dense rate (e.g.
-                          power_cubes' 3.5/s) to an unbounded autopilot
+                          power_cubes' dense-training rate) to an unbounded autopilot
                           session piled up cubes without limit the longer
                           you watched, instead of settling at a steady
                           state.

@@ -18,7 +18,9 @@ from hylaeanrover import RoverEnv, OBS_DIM, ACTION_COUNT, FIXED_DT
 
 
 def main() -> None:
-    print(f"RoverEnv schema: obs_dim={OBS_DIM}, action_count={ACTION_COUNT}, dt={FIXED_DT:.4f}s")
+    print(
+        f"RoverEnv schema: obs_dim={OBS_DIM}, action_count={ACTION_COUNT}, dt={FIXED_DT:.4f}s"
+    )
 
     env = RoverEnv(seed=42, max_steps=600)
 
@@ -33,8 +35,8 @@ def main() -> None:
     print(f"\nFresh obs shape={obs.shape}, dtype={obs.dtype}")
     print(f"  imu (first 7):      {np.round(obs[:7], 3)}")
     print(f"  lidar (next 8):     {np.round(obs[7:15], 1)}")
-    print(f"  minerals (35:41):   {np.round(obs[35:41], 3)}")
-    print(f"  beacons_remaining:  {obs[41]}")
+    print(f"  minerals (34:40):   {np.round(obs[34:40], 3)}")
+    print(f"  beacons_remaining:  {obs[40]}")
     print(f"  info: {info}")
 
     # Random rollout sanity check — confirms step() returns sensible

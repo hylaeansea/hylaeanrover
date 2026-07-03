@@ -88,6 +88,109 @@ DEFAULT_POWER_CAPACITY_WH = 100.0
 DEFAULT_CUBE_SPAWN_LAMBDA = 1.5
 DEFAULT_CUBE_SPAWN_EXTENT = 30.0
 
+CUBE_SPAWN_PRESETS: dict[str, dict[str, float]] = {
+    # Current Stage 1 training density: enough positives for gradient signal.
+    "dense_training": {
+        "lambda": DEFAULT_CUBE_SPAWN_LAMBDA,
+        "extent": DEFAULT_CUBE_SPAWN_EXTENT,
+    },
+    # Bridge between training density and the game's sparse lifeline cadence.
+    "transition": {"lambda": 0.30, "extent": 120.0},
+    # Matches the game's current defaults.
+    "sparse_game": {"lambda": 0.05, "extent": 500.0},
+    # Negative-control scenario: no power cubes should appear.
+    "none": {"lambda": 0.0, "extent": DEFAULT_CUBE_SPAWN_EXTENT},
+}
+
+HORIZON_STEPS: dict[str, int] = {
+    "short": 2_000,
+    "medium": 7_200,
+    "long": 21_600,
+}
+
+TERRAIN_HEIGHT_PRESETS: dict[
+    str, tuple[Optional[float], Optional[tuple[float, float]]]
+] = {
+    "fixed_1_0": (1.0, None),
+    "fixed_1_5": (1.5, None),
+    "fixed_2_0": (2.0, None),
+    "mixed_1_2": (None, (1.0, 2.0)),
+}
+
+EVAL_SCENARIOS: dict[str, dict[str, Any]] = {
+    "dense_training": {"cube_spawn_preset": "dense_training"},
+    "sparse_game": {"cube_spawn_preset": "sparse_game"},
+    "low_power_start": {
+        "cube_spawn_preset": "transition",
+        "power_start_fraction": 0.35,
+        "cube_shaping": "off",
+    },
+    "cube_visible_low_power": {
+        "cube_spawn_preset": "dense_training",
+        "power_start_fraction": 0.35,
+        "cube_shaping": "off",
+    },
+    "no_cube_control": {
+        "cube_spawn_preset": "none",
+        "power_start_fraction": 0.35,
+        "cube_shaping": "off",
+    },
+    "terrain_fixed_1_0": {"terrain_height": "fixed_1_0"},
+    "terrain_fixed_1_5": {"terrain_height": "fixed_1_5"},
+    "terrain_fixed_2_0": {"terrain_height": "fixed_2_0"},
+    "terrain_mixed_1_2": {"terrain_height": "mixed_1_2"},
+}
+
+SCENARIOS = tuple(EVAL_SCENARIOS.keys())
+CUBE_SHAPING_MODES = ("off", "low_power")
+LOCOMOTION_SHAPING_MODES = ("off", "power_efficiency")
+
+
+def apply_scenario_defaults(
+    scenario: Optional[str],
+    *,
+    cube_spawn_preset: Optional[str] = None,
+    power_start_fraction: Optional[float] = None,
+    terrain_height: Optional[str] = None,
+    cube_shaping: Optional[str] = None,
+) -> dict[str, Any]:
+    """Resolve scenario + explicit CLI overrides into env kwargs."""
+    cfg: dict[str, Any] = {}
+    if scenario:
+        if scenario not in EVAL_SCENARIOS:
+            raise ValueError(f"unknown scenario {scenario!r}; choose from {SCENARIOS}")
+        cfg.update(EVAL_SCENARIOS[scenario])
+    if cube_spawn_preset is not None:
+        cfg["cube_spawn_preset"] = cube_spawn_preset
+    if power_start_fraction is not None:
+        cfg["power_start_fraction"] = power_start_fraction
+    if terrain_height is not None:
+        cfg["terrain_height"] = terrain_height
+    if cube_shaping is not None:
+        cfg["cube_shaping"] = cube_shaping
+    return cfg
+
+
+def parse_terrain_height(
+    value: Optional[str],
+) -> tuple[Optional[float], Optional[tuple[float, float]]]:
+    if value is None:
+        return None, None
+    if value in TERRAIN_HEIGHT_PRESETS:
+        return TERRAIN_HEIGHT_PRESETS[value]
+    if ":" in value:
+        lo_s, hi_s = value.split(":", 1)
+        lo, hi = float(lo_s), float(hi_s)
+        if lo <= 0.0 or hi <= 0.0 or hi < lo:
+            raise ValueError(
+                "terrain height range must be positive and ordered as min:max"
+            )
+        return None, (lo, hi)
+    scale = float(value)
+    if scale <= 0.0:
+        raise ValueError("terrain height scale must be positive")
+    return scale, None
+
 
 class ActionRepeat(gym.Wrapper):
     """Hold each chosen action for `k` physics ticks (frame-skip).
@@ -135,16 +238,45 @@ class StagedRewardWrapper(gym.Wrapper):
         env: gym.Env,
         stage: str,
         flip_penalty: float = 50.0,
+        scenario: Optional[str] = None,
+        cube_spawn_preset: Optional[str] = None,
+        locomotion_shaping: str = "off",
+        cube_shaping: str = "off",
+        low_power_threshold: float = 0.45,
+        cube_approach_reward: float = 0.25,
+        ignored_cube_penalty: float = 25.0,
+        coast_distance_bonus: float = 0.35,
+        power_draw_penalty: float = 40.0,
+        power_recovery_reward: float = 20.0,
+        out_of_power_penalty: float = 75.0,
     ) -> None:
         if stage not in STAGE_WEIGHTS:
             raise ValueError(f"unknown stage {stage!r}; choose from {STAGES}")
+        if locomotion_shaping not in LOCOMOTION_SHAPING_MODES:
+            raise ValueError(f"unknown locomotion_shaping {locomotion_shaping!r}")
+        if cube_shaping not in CUBE_SHAPING_MODES:
+            raise ValueError(f"unknown cube_shaping {cube_shaping!r}")
         super().__init__(env)
         self.stage = stage
         self._w = STAGE_WEIGHTS[stage]
         self.flip_penalty = flip_penalty
+        self.scenario = scenario
+        self.cube_spawn_preset = cube_spawn_preset
+        self.locomotion_shaping = locomotion_shaping
+        self.cube_shaping = cube_shaping
+        self.low_power_threshold = low_power_threshold
+        self.cube_approach_reward = cube_approach_reward
+        self.ignored_cube_penalty = ignored_cube_penalty
+        self.coast_distance_bonus = coast_distance_bonus
+        self.power_draw_penalty = power_draw_penalty
+        self.power_recovery_reward = power_recovery_reward
+        self.out_of_power_penalty = out_of_power_penalty
         # Cumulative component totals from the previous step, so we can
         # take deltas. Seeded in reset().
         self._prev = {"distance": 0.0, "cube": 0.0, "mineral": 0.0, "beacon": 0.0}
+        self._prev_power_frac = 1.0
+        self._prev_visible_range: Optional[float] = None
+        self._low_power_visible_steps = 0
 
     @staticmethod
     def _components(info: dict[str, Any]) -> dict[str, float]:
@@ -155,6 +287,72 @@ class StagedRewardWrapper(gym.Wrapper):
             "beacon": float(info.get("reward_beacon_bonus", 0.0)),
         }
 
+    def _annotate_info(self, info: dict[str, Any]) -> None:
+        if self.scenario is not None:
+            info["scenario"] = self.scenario
+        if self.cube_spawn_preset is not None:
+            info["cube_spawn_preset"] = self.cube_spawn_preset
+        info["locomotion_shaping"] = self.locomotion_shaping
+        info["cube_shaping"] = self.cube_shaping
+
+    @staticmethod
+    def _is_coast_action(action: int) -> bool:
+        # 3, 4, 5 are zero-throttle steering/coast actions. In non-full
+        # stages action 9 is also a no-op and ActionRepeat coasts after
+        # the first sub-tick, so treat it as coast-shaped too.
+        return int(action) in (3, 4, 5, 9)
+
+    def _locomotion_power_shaping(
+        self,
+        action: int,
+        info: dict[str, Any],
+        terminated: bool,
+        distance_delta: float,
+    ) -> float:
+        if self.stage != "locomotion" or self.locomotion_shaping == "off":
+            return 0.0
+
+        power_frac = float(info.get("power_frac", self._prev_power_frac))
+        power_delta = power_frac - self._prev_power_frac
+        shaped = 0.0
+
+        if distance_delta > 0.0 and self._is_coast_action(action):
+            shaped += distance_delta * self.coast_distance_bonus
+        if power_delta < 0.0:
+            shaped -= (-power_delta) * self.power_draw_penalty
+        else:
+            shaped += power_delta * self.power_recovery_reward
+        if terminated and info.get("game_over") == "out_of_power":
+            shaped -= self.out_of_power_penalty
+        return shaped
+
+    def _cube_approach_shaping(
+        self,
+        info: dict[str, Any],
+        terminated: bool,
+    ) -> float:
+        if self.stage != "power_cubes" or self.cube_shaping == "off":
+            return 0.0
+        power_frac = float(info.get("power_frac", 1.0))
+        visible = int(info.get("visible_cube_count", 0) or 0) > 0
+        nearest_raw = info.get("nearest_visible_cube_range")
+        nearest = float(nearest_raw) if nearest_raw is not None else None
+        if power_frac > self.low_power_threshold or not visible or nearest is None:
+            self._prev_visible_range = nearest if visible else None
+            return 0.0
+
+        self._low_power_visible_steps += 1
+        shaped = 0.0
+        if self._prev_visible_range is not None:
+            # Positive when the policy moves toward the visible cube,
+            # negative when it moves away while power is binding.
+            shaped += (self._prev_visible_range - nearest) * self.cube_approach_reward
+        self._prev_visible_range = nearest
+
+        if terminated and info.get("game_over") == "out_of_power":
+            shaped -= self.ignored_cube_penalty
+        return shaped
+
     def reset(
         self,
         *,
@@ -163,23 +361,38 @@ class StagedRewardWrapper(gym.Wrapper):
     ) -> tuple[Any, dict[str, Any]]:
         obs, info = self.env.reset(seed=seed, options=options)
         self._prev = self._components(info)
+        self._prev_power_frac = float(info.get("power_frac", 1.0))
+        self._prev_visible_range = None
+        self._low_power_visible_steps = 0
+        self._annotate_info(info)
         return obs, info
 
     def step(self, action: int) -> tuple[Any, float, bool, bool, dict[str, Any]]:
         obs, _reward, terminated, truncated, info = self.env.step(action)
 
         cur = self._components(info)
+        deltas = {
+            key: cur[key] - self._prev[key]
+            for key in ("distance", "cube", "mineral", "beacon")
+        }
         shaped = (
-            self._w["distance"] * (cur["distance"] - self._prev["distance"])
-            + self._w["cube"] * (cur["cube"] - self._prev["cube"])
-            + self._w["mineral"] * (cur["mineral"] - self._prev["mineral"])
-            + self._w["beacon"] * (cur["beacon"] - self._prev["beacon"])
+            self._w["distance"] * deltas["distance"]
+            + self._w["cube"] * deltas["cube"]
+            + self._w["mineral"] * deltas["mineral"]
+            + self._w["beacon"] * deltas["beacon"]
         )
+        shaped += self._locomotion_power_shaping(
+            int(action), info, terminated, deltas["distance"]
+        )
+        shaped += self._cube_approach_shaping(info, terminated)
         self._prev = cur
+        self._prev_power_frac = float(info.get("power_frac", self._prev_power_frac))
 
         if terminated and info.get("game_over") == "flipped":
             shaped -= self.flip_penalty
 
+        self._annotate_info(info)
+        info["low_power_visible_steps"] = self._low_power_visible_steps
         return obs, float(shaped), terminated, truncated, info
 
 
@@ -213,8 +426,20 @@ def make_staged_env(
     flip_penalty: float = 50.0,
     frame_skip: int = 1,
     power_capacity: Optional[float] = None,
+    power_start_fraction: Optional[float] = None,
+    cube_spawn_preset: Optional[str] = None,
     cube_spawn_lambda: Optional[float] = None,
     cube_spawn_extent: Optional[float] = None,
+    cube_spawn_seed: Optional[int] = None,
+    terrain_height_scale: Optional[float] = None,
+    terrain_height_scale_range: Optional[tuple[float, float]] = None,
+    scenario: Optional[str] = None,
+    locomotion_shaping: str = "off",
+    locomotion_coast_bonus: float = 0.35,
+    locomotion_power_draw_penalty: float = 40.0,
+    locomotion_power_recovery_reward: float = 20.0,
+    locomotion_out_of_power_penalty: float = 75.0,
+    cube_shaping: str = "off",
 ) -> gym.Env:
     """Construct a `RoverEnv` configured for `stage` and wrap its reward.
 
@@ -243,19 +468,51 @@ def make_staged_env(
         raise ValueError(f"unknown stage {stage!r}; choose from {STAGES}")
     if power_capacity is None:
         power_capacity = DEFAULT_POWER_CAPACITY_WH
-    if stage != "locomotion":
+    if power_start_fraction is None:
+        power_start_fraction = 1.0
+    if cube_spawn_preset is not None:
+        if cube_spawn_preset not in CUBE_SPAWN_PRESETS:
+            raise ValueError(
+                f"unknown cube_spawn_preset {cube_spawn_preset!r}; "
+                f"choose from {tuple(CUBE_SPAWN_PRESETS)}"
+            )
+        preset = CUBE_SPAWN_PRESETS[cube_spawn_preset]
+        if cube_spawn_lambda is None:
+            cube_spawn_lambda = preset["lambda"]
+        if cube_spawn_extent is None:
+            cube_spawn_extent = preset["extent"]
+    elif stage != "locomotion":
+        cube_spawn_preset = "dense_training"
         if cube_spawn_lambda is None:
             cube_spawn_lambda = DEFAULT_CUBE_SPAWN_LAMBDA
         if cube_spawn_extent is None:
             cube_spawn_extent = DEFAULT_CUBE_SPAWN_EXTENT
+    else:
+        cube_spawn_preset = "sparse_game"
     env: gym.Env = RoverEnv(
         seed=seed,
         max_steps=max_steps,
         beacons_enabled=(stage == "full"),
         power_capacity=power_capacity,
+        power_start_fraction=power_start_fraction,
         cube_spawn_lambda=cube_spawn_lambda,
         cube_spawn_extent=cube_spawn_extent,
+        cube_spawn_seed=cube_spawn_seed,
+        terrain_height_scale=terrain_height_scale,
+        terrain_height_scale_range=terrain_height_scale_range,
     )
     if frame_skip > 1:
         env = ActionRepeat(env, frame_skip)
-    return StagedRewardWrapper(env, stage=stage, flip_penalty=flip_penalty)
+    return StagedRewardWrapper(
+        env,
+        stage=stage,
+        flip_penalty=flip_penalty,
+        scenario=scenario,
+        cube_spawn_preset=cube_spawn_preset,
+        locomotion_shaping=locomotion_shaping,
+        coast_distance_bonus=locomotion_coast_bonus,
+        power_draw_penalty=locomotion_power_draw_penalty,
+        power_recovery_reward=locomotion_power_recovery_reward,
+        out_of_power_penalty=locomotion_out_of_power_penalty,
+        cube_shaping=cube_shaping,
+    )

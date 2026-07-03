@@ -160,7 +160,7 @@ env.close()
 ```
 
 Action layout (10 discrete) and the 41-float observation schema — plus
-the staged training curriculum (locomotion → minerals → full) — are
+the staged training curriculum (locomotion → power_cubes → minerals → full) — are
 documented in detail in [`python/README.md`](python/README.md) and
 [`docs/rl_training_plan.md`](docs/rl_training_plan.md).
 
@@ -173,6 +173,7 @@ launch the game with `--policy`:
 ```bash
 # from python/, with the venv active
 python examples/export_policy.py \
+    --stage locomotion \
     --model runs/stage0/model.zip --vecnorm runs/stage0/vecnorm.pkl
 
 cargo run -p hylaeanrover_game --release -- --policy runs/stage0/model.onnx
