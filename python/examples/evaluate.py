@@ -46,6 +46,8 @@ def _env_kwargs_from_args(args: argparse.Namespace) -> dict[str, Any]:
         power_start_fraction=args.power_start_fraction,
         terrain_height=args.terrain_height,
         cube_shaping=args.cube_shaping,
+        forced_cube_distance=args.forced_cube_distance,
+        forced_cube_bearing_deg=args.forced_cube_bearing_deg,
     )
     terrain_scale, terrain_range = parse_terrain_height(cfg.pop("terrain_height", None))
     cfg["terrain_height_scale"] = terrain_scale
@@ -324,6 +326,24 @@ def main() -> None:
     )
     p.add_argument("--cube-spawn-seed", type=int, default=None)
     p.add_argument("--power-start-fraction", type=float, default=None)
+    p.add_argument(
+        "--forced-cube-distance",
+        type=float,
+        default=None,
+        help=(
+            "place one cube at reset this many meters from the rover; "
+            "must be paired with --forced-cube-bearing-deg"
+        ),
+    )
+    p.add_argument(
+        "--forced-cube-bearing-deg",
+        type=float,
+        default=None,
+        help=(
+            "bearing for a reset-time forced cube, within the cube sensor "
+            "cone; must be paired with --forced-cube-distance"
+        ),
+    )
     p.add_argument(
         "--terrain-height",
         type=str,

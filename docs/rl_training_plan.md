@@ -83,15 +83,23 @@ transfer across all stages:
   small alive bonus). Cube/mineral/beacon bonuses excluded. Agent learns to
   drive far, steer, manage power (power cubes are in the obs but not yet
   rewarded), not flip. Densest signal; fastest proof of learning.
-- **Stage 1 — Power cubes.** Reward = distance + flat per-pickup cube bonus
-  (`CUBE_PICKUP_BONUS` in `reward.rs`). Load Stage 0 weights, continue.
-  Motor skills transfer; agent now also steers toward the visible-cube
-  sensor's bearing/distance readout instead of driving blind. The cube
-  Poisson spawn is also densified and its region shrunk for this stage
-  only (`DEFAULT_CUBE_SPAWN_LAMBDA`/`DEFAULT_CUBE_SPAWN_EXTENT` in
-  `wrappers.py`) — the game's spawn rate is tuned for minutes of human
-  play, not one ~33s episode, so an unmodified episode sees too few
-  reachable cubes for reliable seek-behavior gradient signal.
+- **Stage 1A — Cube intercept.** Reward = cube-intercept shaping +
+  pickup success, with no random cube spawns and one settled forced cube.
+  Load Stage 0 weights, optionally pretrain the policy head from the
+  built-in close-range teacher, then PPO fine-tune. This isolates the
+  missing visible-cube sensor-to-action behavior before broad cube
+  training resumes.
+- **Stage 1B — Power idle.** Teacher-pretrained low-power no-target
+  behavior, with no random cubes and low starting power. Load Stage 1A
+  weights and teach the policy not to spend a nearly empty battery when
+  the actionable cube sensor is empty.
+- **Stage 1C — Power cubes.** Reward = pickup bonus plus mixed
+  dense/bridge/sparse-visible scenarios. Load Stage 1B weights, continue.
+  Dense spawns remain a curriculum tool, but no-shaping
+  `sparse_visible_low_power` and `sparse_game` evals are required before
+  promotion. Forced diagnostic cubes are settled on/near terrain and the
+  RL-visible cube sensor hides non-actionable airborne cubes so `OBS_DIM`
+  stays fixed and the visible cube slots remain actionable.
 - **Stage 2 — Drive + minerals.** Reward = distance + cube bonus +
   scarcity-weighted mineral integral. Load Stage 1 weights, continue.
   Motor + seek skills transfer; agent now also steers toward scarce
@@ -136,7 +144,8 @@ File: `python/README.md` — update the obs table (47 → 42).
 Dir: `python/` (add extras as needed: `tensorboard`).
 
 - `python/hylaeanrover/wrappers.py` — `StagedRewardWrapper(gym.Wrapper)`:
-  takes `stage` ∈ {`locomotion`, `power_cubes`, `minerals`, `full`}, recomputes `reward`
+  takes `stage` ∈ {`locomotion`, `cube_intercept`, `power_idle`,
+  `power_cubes`, `minerals`, `full`}, recomputes `reward`
   each step from info-field deltas (`reward_distance`,
   `reward_mineral_integral`, `reward_beacon_bonus`), adds a small flip
   penalty when `info["game_over"] == "flipped"`. For `locomotion`/`minerals`
@@ -175,11 +184,17 @@ Dir: `python/` (add extras as needed: `tensorboard`).
 - **Stage 0 → 1:** trained mean episode distance clearly beats the random
   baseline and flip-rate drops (e.g. distance ≳ 2–3× random, flip-rate
   trending down) over an eval batch.
-- **Stage 1 → 2:** do not advance until the hardening gates in
+- **Stage 1A → 1B:** do not start `power_idle` training until
+  `cube_intercept` reaches the pickup and low-power gates in
+  `docs/rl_stage0_stage1_hardening_plan.md`.
+- **Stage 1B → 1C:** do not start broad `power_cubes` training until
+  `power_idle` / `no_cube_control` evals show low out-of-power behavior
+  when no actionable cube is visible.
+- **Stage 1C → 2:** do not advance until the hardening gates in
   `docs/rl_stage0_stage1_hardening_plan.md` pass. The `power_cubes`
   policy must beat the promoted locomotion policy on pickups, end power,
   low-power behavior, and out-of-power rate across dense, transition,
-  sparse-game, low-power, visible-cube, and no-cube-control scenarios.
+  sparse-visible, sparse-game, and no-cube-control scenarios.
 - **Stage 2 → 3:** mineral-integral component per episode beats a
   Stage 1 policy evaluated under the Stage 2 reward, without the
   cube-pickup rate regressing badly from Stage 1.
@@ -195,10 +210,13 @@ Dir: `python/` (add extras as needed: `tensorboard`).
 3. `python examples/evaluate.py --random` — record baseline metrics.
 4. `python examples/train.py --stage locomotion --timesteps 1000000 --save runs/stage0`
    then `evaluate.py --load runs/stage0` — confirm Stage 0 gate.
-5. `train.py --stage power_cubes --load runs/stage0/model.zip --vecnorm runs/stage0/vecnorm.pkl --reset-reward-stats --save runs/stage1`
+5. `train.py --stage cube_intercept --load runs/stage0/model.zip --vecnorm runs/stage0/vecnorm.pkl --reset-reward-stats --teacher-pretrain-samples 20000 --save runs/stage1_cube_intercept`
+   → evaluate the forced-visible intercept gates with shaping off.
+6. `train.py --stage power_idle --load runs/stage1_cube_intercept/best/best_model.zip --vecnorm runs/stage1_cube_intercept/best/vecnorm.pkl --reset-reward-stats --scenario power_idle --teacher-pretrain-samples 20000 --teacher-scenarios power_idle,cube_intercept_low_power --teacher-pretrain-only --save runs/stage1_power_idle_bc`
+7. `train.py --stage power_cubes --load runs/stage1_power_idle_bc/best/best_model.zip --vecnorm runs/stage1_power_idle_bc/best/vecnorm.pkl --reset-reward-stats --save runs/stage1_power_cubes`
    → evaluate against `docs/rl_stage0_stage1_hardening_plan.md` gates.
    Only after those pass, repeat for `--stage minerals` and `--stage full`.
-6. Watch `tensorboard --logdir runs/` for `rollout/ep_rew_mean` and
+7. Watch `tensorboard --logdir runs/` for `rollout/ep_rew_mean` and
    `ep_len_mean` rising.
 
 ## Files to modify
@@ -421,3 +439,21 @@ mid-training via the O key.
     low-power visible-cube behavior.
   - `export_policy.py --stage` is required so non-full exports do not
     accidentally write full-stage runtime config.
+- 2026-07-05 — Stage 1 framework reset after forced-visible diagnostics:
+  - Forced/training cubes now spawn settled on/near terrain, and the
+    RL-visible cube sensor filters to actionable cubes while preserving
+    `OBS_DIM == 41`. Debug `info` fields expose nearest raw cube height
+    and actionability without feeding them to the policy.
+  - Stage 1 is split into `cube_intercept`, `power_idle`, and `power_cubes`.
+    `cube_intercept` uses one forced cube, no random spawns, intercept
+    shaping, loss-of-sight/timeout penalties, and an optional close-range
+    teacher policy-head pretrain before PPO. `power_idle` then isolates
+    low-power no-target conservation with a teacher dataset that mixes
+    no-cube coast labels and visible-cube intercept labels. `power_cubes`
+    resumes only after the intercept and idle gates pass. During broad
+    power-cube training, `power_cubes` carries cube reward but zero
+    distance reward so pickup and power behavior are hardened before
+    travel reward returns in later stages.
+  - Promotion is blocked until no-shaping `sparse_visible_low_power` and
+    `sparse_game` checks show pickup behavior; dense pickup success alone
+    is not promotable.

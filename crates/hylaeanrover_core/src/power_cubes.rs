@@ -74,7 +74,10 @@ const REGEN_EFFICIENCY: f32 = 0.2;
 /// How much energy each cube grants (Wh).
 const CUBE_VALUE: f32 = 100.0;
 /// Distance (m) from chassis at which a cube starts being absorbed.
-const PICKUP_RANGE: f32 = 2.0;
+/// The sensor reports XZ range while pickup uses full 3D distance from
+/// the chassis center, so this needs enough vertical tolerance for a
+/// rover that drives next to a settled ground cube to actually collect it.
+const PICKUP_RANGE: f32 = 3.0;
 /// Seconds for a cube to fully charge (glow ramp duration).
 const CHARGE_TIME: f32 = 0.5;
 /// Multiplier on the base emissive value at the peak of the glow ramp.
@@ -218,6 +221,31 @@ impl PowerCubeRng {
 #[derive(Resource)]
 struct CubeSpawnExtent(f32);
 
+/// One-shot cube placement request used by RL diagnostics/curriculum.
+///
+/// Normal gameplay and sparse eval still use the Poisson spawner. This
+/// resource lets the Python env add exactly one reachable cube at reset so
+/// Stage 1 can be tested on "cube is visible, go intercept it" without
+/// waiting for a rare sparse spawn.
+#[derive(Resource, Clone, Copy, Default)]
+pub struct ForcedPowerCubeSpawn {
+    pub pending: bool,
+    pub distance_m: f32,
+    pub bearing_deg: f32,
+}
+
+impl ForcedPowerCubeSpawn {
+    pub fn request(&mut self, distance_m: f32, bearing_deg: f32) {
+        self.pending = true;
+        self.distance_m = distance_m;
+        self.bearing_deg = bearing_deg;
+    }
+
+    pub fn clear(&mut self) {
+        self.pending = false;
+    }
+}
+
 /// The rover's energy reserve in Watt-hours.
 #[derive(Resource)]
 pub struct PowerState {
@@ -305,6 +333,7 @@ impl Default for PowerCubesPlugin {
 impl Plugin for PowerCubesPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<PowerCubeAssets>()
+            .init_resource::<ForcedPowerCubeSpawn>()
             .insert_resource(PoissonSpawner::with_lambda(self.spawn_lambda))
             .insert_resource(CubeSpawnExtent(self.spawn_extent))
             .insert_resource(PowerCubeRng::from_seed(self.rng_seed))
@@ -325,6 +354,7 @@ impl Plugin for PowerCubesPlugin {
             .add_systems(
                 Update,
                 (
+                    spawn_forced_power_cube,
                     spawn_power_cubes,
                     despawn_cubes_on_relaunch,
                     reset_spawner_on_relaunch,
@@ -494,6 +524,90 @@ fn spawn_power_cubes(
     let z = anchor.z + radius * angle.sin();
     let local_y = terrain.height_at(x, z);
 
+    spawn_power_cube_at(&mut commands, &assets, &mut materials, rng, x, local_y, z);
+}
+
+fn spawn_forced_power_cube(
+    mut commands: Commands,
+    mut forced: ResMut<ForcedPowerCubeSpawn>,
+    mut cube_rng: ResMut<PowerCubeRng>,
+    assets: Res<PowerCubeAssets>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    terrain: Option<Res<TerrainState>>,
+    chassis_res: Res<ChassisEntity>,
+    chassis_q: Query<&GlobalTransform>,
+    existing_cubes: Query<Entity, With<PowerCube>>,
+) {
+    if !forced.pending || existing_cubes.iter().count() >= MAX_ALIVE_CUBES {
+        return;
+    }
+    let Some(terrain) = terrain.as_ref() else {
+        return;
+    };
+    let Some(chassis_id) = chassis_res.0 else {
+        return;
+    };
+    let Ok(chassis_gxf) = chassis_q.get(chassis_id) else {
+        return;
+    };
+
+    let fwd3 = chassis_gxf.rotation() * Vec3::NEG_X;
+    let fwd = Vec2::new(fwd3.x, fwd3.z);
+    if fwd.length_squared() < 1e-6 {
+        return;
+    }
+    let fwd = fwd.normalize();
+    let bearing_rad = forced.bearing_deg.to_radians();
+    let dir = fwd * bearing_rad.cos() + Vec2::new(-fwd.y, fwd.x) * bearing_rad.sin();
+    let anchor = chassis_gxf.translation();
+    let x = anchor.x + forced.distance_m * dir.x;
+    let z = anchor.z + forced.distance_m * dir.y;
+    let local_y = terrain.height_at(x, z);
+
+    spawn_power_cube_at_height(
+        &mut commands,
+        &assets,
+        &mut materials,
+        &mut cube_rng.rng,
+        x,
+        local_y,
+        z,
+        CUBE_HALF_EXTENT + 0.05,
+    );
+    forced.pending = false;
+}
+
+fn spawn_power_cube_at(
+    commands: &mut Commands,
+    assets: &PowerCubeAssets,
+    materials: &mut Assets<StandardMaterial>,
+    rng: &mut StdRng,
+    x: f32,
+    local_y: f32,
+    z: f32,
+) {
+    spawn_power_cube_at_height(
+        commands,
+        assets,
+        materials,
+        rng,
+        x,
+        local_y,
+        z,
+        SPAWN_HEIGHT,
+    );
+}
+
+fn spawn_power_cube_at_height(
+    commands: &mut Commands,
+    assets: &PowerCubeAssets,
+    materials: &mut Assets<StandardMaterial>,
+    rng: &mut StdRng,
+    x: f32,
+    local_y: f32,
+    z: f32,
+    spawn_height: f32,
+) {
     let spin = Vec3::new(
         rng.gen_range(-1.0..1.0),
         rng.gen_range(-1.0..1.0),
@@ -516,7 +630,7 @@ fn spawn_power_cubes(
     commands.spawn((
         Mesh3d(assets.mesh.clone()),
         MeshMaterial3d(material),
-        Transform::from_xyz(x, local_y + SPAWN_HEIGHT, z),
+        Transform::from_xyz(x, local_y + spawn_height, z),
         RigidBody::Dynamic,
         Collider::cuboid(CUBE_HALF_EXTENT, CUBE_HALF_EXTENT, CUBE_HALF_EXTENT),
         Friction::coefficient(0.5),

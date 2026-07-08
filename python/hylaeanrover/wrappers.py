@@ -4,7 +4,7 @@ The training plan (see `docs/rl_training_plan.md`) trains the rover in
 stages that share one fixed observation/action space and differ *only*
 in the reward, so each stage's policy weights initialize the next:
 
-    locomotion  →  power_cubes  →  minerals  →  full
+    locomotion  →  cube_intercept  →  power_idle  →  power_cubes  →  minerals  →  full
 
 `StagedRewardWrapper` recomputes the per-step reward from the cumulative
 reward components the Rust env already exposes in its `info` dict
@@ -30,13 +30,27 @@ from hylaeanrover import RoverEnv
 # themselves come from the Rust reward (distance in meters, the flat
 # per-pickup cube bonus, the scarcity-weighted mineral line-integral, and
 # the 50x beacon bonus). Once a component's weight turns on for a stage it
-# stays on for every later stage too — nothing already learned is
-# discarded, only new objectives are layered on top (reward annealing).
+# can be retuned per stage. Stage 1 keeps distance deliberately weaker
+# than cube pickup so broad power-cube training cannot pass by merely
+# driving far while ignoring visible cubes.
 STAGE_WEIGHTS: dict[str, dict[str, float]] = {
     # Drive far, stay upright, manage power. Densest signal.
     "locomotion": {"distance": 1.0, "cube": 0.0, "mineral": 0.0, "beacon": 0.0},
-    # Also reward actively seeking out and collecting power cubes.
-    "power_cubes": {"distance": 1.0, "cube": 1.0, "mineral": 0.0, "beacon": 0.0},
+    # Isolated visible-cube intercept. No distance reward: pickup is the task.
+    "cube_intercept": {
+        "distance": 0.0,
+        "cube": 1.0,
+        "mineral": 0.0,
+        "beacon": 0.0,
+    },
+    # Low-power no-target discipline. This teaches the policy not to burn a
+    # nearly empty battery when the actionable cube sensor is empty.
+    "power_idle": {"distance": 0.0, "cube": 0.0, "mineral": 0.0, "beacon": 0.0},
+    # Also reward actively seeking out and collecting power cubes. Distance is
+    # off in this stage so the policy cannot pass by driving until the battery
+    # dies; later stages reintroduce travel objectives after pickup behavior
+    # is reliable.
+    "power_cubes": {"distance": 0.0, "cube": 1.0, "mineral": 0.0, "beacon": 0.0},
     # Also reward crossing scarce-mineral ground.
     "minerals": {"distance": 1.0, "cube": 1.0, "mineral": 1.0, "beacon": 0.0},
     # Full mission, including strategic beacon placement.
@@ -94,7 +108,11 @@ CUBE_SPAWN_PRESETS: dict[str, dict[str, float]] = {
         "lambda": DEFAULT_CUBE_SPAWN_LAMBDA,
         "extent": DEFAULT_CUBE_SPAWN_EXTENT,
     },
-    # Bridge between training density and the game's sparse lifeline cadence.
+    # Intermediate curriculum step after dense low-power training. Keeps
+    # pickups frequent enough for PPO while widening the search area before
+    # the much sparser transition setting.
+    "bridge_training": {"lambda": 0.75, "extent": 75.0},
+    # Near-sparse bridge between training density and the game's cadence.
     "transition": {"lambda": 0.30, "extent": 120.0},
     # Matches the game's current defaults.
     "sparse_game": {"lambda": 0.05, "extent": 500.0},
@@ -119,8 +137,31 @@ TERRAIN_HEIGHT_PRESETS: dict[
 
 EVAL_SCENARIOS: dict[str, dict[str, Any]] = {
     "dense_training": {"cube_spawn_preset": "dense_training"},
+    "bridge_training": {"cube_spawn_preset": "bridge_training"},
+    "bridge_low_power": {
+        "cube_spawn_preset": "bridge_training",
+        "power_start_fraction": 0.35,
+        "cube_shaping": "off",
+    },
     "transition": {"cube_spawn_preset": "transition"},
     "sparse_game": {"cube_spawn_preset": "sparse_game"},
+    "sparse_low_power": {
+        "cube_spawn_preset": "sparse_game",
+        "power_start_fraction": 0.35,
+        "cube_shaping": "off",
+    },
+    "sparse_visible_reset": {
+        "cube_spawn_preset": "sparse_game",
+        "forced_cube_distance_range": (30.0, 60.0),
+        "forced_cube_bearing_range": (-35.0, 35.0),
+    },
+    "sparse_visible_low_power": {
+        "cube_spawn_preset": "sparse_game",
+        "power_start_fraction": 0.35,
+        "forced_cube_distance_range": (30.0, 60.0),
+        "forced_cube_bearing_range": (-35.0, 35.0),
+        "cube_shaping": "off",
+    },
     "low_power_start": {
         "cube_spawn_preset": "transition",
         "power_start_fraction": 0.35,
@@ -136,6 +177,30 @@ EVAL_SCENARIOS: dict[str, dict[str, Any]] = {
         "power_start_fraction": 0.35,
         "cube_shaping": "off",
     },
+    "power_idle": {
+        "cube_spawn_preset": "none",
+        "power_start_fraction": 0.35,
+        "cube_shaping": "off",
+    },
+    "cube_intercept": {
+        "cube_spawn_preset": "none",
+        "forced_cube_distance_range": (15.0, 60.0),
+        "forced_cube_bearing_range": (-35.0, 35.0),
+        "cube_shaping": "intercept",
+    },
+    "cube_intercept_close": {
+        "cube_spawn_preset": "none",
+        "forced_cube_distance_range": (15.0, 20.0),
+        "forced_cube_bearing_range": (0.0, 5.0),
+        "cube_shaping": "intercept",
+    },
+    "cube_intercept_low_power": {
+        "cube_spawn_preset": "none",
+        "power_start_fraction": 0.35,
+        "forced_cube_distance_range": (15.0, 60.0),
+        "forced_cube_bearing_range": (-35.0, 35.0),
+        "cube_shaping": "intercept",
+    },
     "terrain_fixed_1_0": {"terrain_height": "fixed_1_0"},
     "terrain_fixed_1_5": {"terrain_height": "fixed_1_5"},
     "terrain_fixed_2_0": {"terrain_height": "fixed_2_0"},
@@ -143,7 +208,7 @@ EVAL_SCENARIOS: dict[str, dict[str, Any]] = {
 }
 
 SCENARIOS = tuple(EVAL_SCENARIOS.keys())
-CUBE_SHAPING_MODES = ("off", "low_power")
+CUBE_SHAPING_MODES = ("off", "low_power", "intercept")
 LOCOMOTION_SHAPING_MODES = ("off", "power_efficiency")
 
 
@@ -154,6 +219,8 @@ def apply_scenario_defaults(
     power_start_fraction: Optional[float] = None,
     terrain_height: Optional[str] = None,
     cube_shaping: Optional[str] = None,
+    forced_cube_distance: Optional[float] = None,
+    forced_cube_bearing_deg: Optional[float] = None,
 ) -> dict[str, Any]:
     """Resolve scenario + explicit CLI overrides into env kwargs."""
     cfg: dict[str, Any] = {}
@@ -169,6 +236,12 @@ def apply_scenario_defaults(
         cfg["terrain_height"] = terrain_height
     if cube_shaping is not None:
         cfg["cube_shaping"] = cube_shaping
+    if forced_cube_distance is not None:
+        cfg["forced_cube_distance"] = forced_cube_distance
+        cfg.pop("forced_cube_distance_range", None)
+    if forced_cube_bearing_deg is not None:
+        cfg["forced_cube_bearing_deg"] = forced_cube_bearing_deg
+        cfg.pop("forced_cube_bearing_range", None)
     return cfg
 
 
@@ -245,11 +318,16 @@ class StagedRewardWrapper(gym.Wrapper):
         cube_shaping: str = "off",
         low_power_threshold: float = 0.45,
         cube_approach_reward: float = 0.25,
+        cube_heading_reward: float = 0.05,
         ignored_cube_penalty: float = 25.0,
+        loss_of_sight_penalty: float = 5.0,
+        intercept_failure_penalty: float = 50.0,
         coast_distance_bonus: float = 0.35,
         power_draw_penalty: float = 40.0,
         power_recovery_reward: float = 20.0,
         out_of_power_penalty: float = 75.0,
+        low_power_no_target_throttle_penalty: float = 0.25,
+        low_power_no_target_coast_reward: float = 0.02,
     ) -> None:
         if stage not in STAGE_WEIGHTS:
             raise ValueError(f"unknown stage {stage!r}; choose from {STAGES}")
@@ -267,17 +345,23 @@ class StagedRewardWrapper(gym.Wrapper):
         self.cube_shaping = cube_shaping
         self.low_power_threshold = low_power_threshold
         self.cube_approach_reward = cube_approach_reward
+        self.cube_heading_reward = cube_heading_reward
         self.ignored_cube_penalty = ignored_cube_penalty
+        self.loss_of_sight_penalty = loss_of_sight_penalty
+        self.intercept_failure_penalty = intercept_failure_penalty
         self.coast_distance_bonus = coast_distance_bonus
         self.power_draw_penalty = power_draw_penalty
         self.power_recovery_reward = power_recovery_reward
         self.out_of_power_penalty = out_of_power_penalty
+        self.low_power_no_target_throttle_penalty = low_power_no_target_throttle_penalty
+        self.low_power_no_target_coast_reward = low_power_no_target_coast_reward
         # Cumulative component totals from the previous step, so we can
         # take deltas. Seeded in reset().
         self._prev = {"distance": 0.0, "cube": 0.0, "mineral": 0.0, "beacon": 0.0}
         self._prev_power_frac = 1.0
         self._prev_visible_range: Optional[float] = None
         self._low_power_visible_steps = 0
+        self._low_power_no_target_steps = 0
 
     @staticmethod
     def _components(info: dict[str, Any]) -> dict[str, float]:
@@ -303,6 +387,14 @@ class StagedRewardWrapper(gym.Wrapper):
         # the first sub-tick, so treat it as coast-shaped too.
         return int(action) in (3, 4, 5, 9)
 
+    @staticmethod
+    def _is_motor_action(action: int) -> bool:
+        return int(action) in (0, 1, 2, 6, 7, 8)
+
+    @staticmethod
+    def _has_visible_cube(info: dict[str, Any]) -> bool:
+        return int(info.get("visible_cube_count", 0) or 0) > 0
+
     def _locomotion_power_shaping(
         self,
         action: int,
@@ -310,7 +402,10 @@ class StagedRewardWrapper(gym.Wrapper):
         terminated: bool,
         distance_delta: float,
     ) -> float:
-        if self.stage != "locomotion" or self.locomotion_shaping == "off":
+        if (
+            self.stage not in ("locomotion", "power_idle", "power_cubes")
+            or self.locomotion_shaping == "off"
+        ):
             return 0.0
 
         power_frac = float(info.get("power_frac", self._prev_power_frac))
@@ -327,20 +422,67 @@ class StagedRewardWrapper(gym.Wrapper):
             shaped -= self.out_of_power_penalty
         return shaped
 
+    def _low_power_no_target_shaping(
+        self,
+        action: int,
+        info: dict[str, Any],
+    ) -> float:
+        if (
+            self.stage not in ("power_idle", "power_cubes")
+            or self.locomotion_shaping == "off"
+        ):
+            return 0.0
+
+        power_frac = float(info.get("power_frac", self._prev_power_frac))
+        if power_frac > self.low_power_threshold or self._has_visible_cube(info):
+            return 0.0
+
+        self._low_power_no_target_steps += 1
+        if self._is_motor_action(action):
+            return -self.low_power_no_target_throttle_penalty
+        return self.low_power_no_target_coast_reward
+
     def _cube_approach_shaping(
         self,
         info: dict[str, Any],
         terminated: bool,
+        truncated: bool,
+        cube_delta: float,
     ) -> float:
-        if self.stage != "power_cubes" or self.cube_shaping == "off":
+        if (
+            self.stage not in ("cube_intercept", "power_cubes")
+            or self.cube_shaping == "off"
+        ):
             return 0.0
         power_frac = float(info.get("power_frac", 1.0))
-        visible = int(info.get("visible_cube_count", 0) or 0) > 0
+        visible = self._has_visible_cube(info)
         nearest_raw = info.get("nearest_visible_cube_range")
         nearest = float(nearest_raw) if nearest_raw is not None else None
-        if power_frac > self.low_power_threshold or not visible or nearest is None:
+        active = (
+            visible
+            and nearest is not None
+            and (
+                self.cube_shaping == "intercept"
+                or power_frac <= self.low_power_threshold
+            )
+        )
+        if not active:
+            shaped = 0.0
+            if (
+                self.stage == "cube_intercept"
+                and self._prev_visible_range is not None
+                and cube_delta <= 0.0
+                and not visible
+            ):
+                shaped -= self.loss_of_sight_penalty
+            if (
+                self.stage == "cube_intercept"
+                and (terminated or truncated)
+                and cube_delta <= 0.0
+            ):
+                shaped -= self.intercept_failure_penalty
             self._prev_visible_range = nearest if visible else None
-            return 0.0
+            return shaped
 
         self._low_power_visible_steps += 1
         shaped = 0.0
@@ -350,8 +492,23 @@ class StagedRewardWrapper(gym.Wrapper):
             shaped += (self._prev_visible_range - nearest) * self.cube_approach_reward
         self._prev_visible_range = nearest
 
+        if self.cube_shaping == "intercept":
+            bearing_raw = info.get("nearest_visible_cube_bearing")
+            if bearing_raw is not None:
+                bearing = abs(float(bearing_raw))
+                # Sensor visibility is already cone-limited; this simply
+                # rewards keeping the nearest visible cube near boresight.
+                alignment = max(0.0, 1.0 - min(bearing, 60.0) / 60.0)
+                shaped += alignment * self.cube_heading_reward
+
         if terminated and info.get("game_over") == "out_of_power":
             shaped -= self.ignored_cube_penalty
+        if (
+            self.stage == "cube_intercept"
+            and (terminated or truncated)
+            and cube_delta <= 0.0
+        ):
+            shaped -= self.intercept_failure_penalty
         return shaped
 
     def reset(
@@ -365,6 +522,7 @@ class StagedRewardWrapper(gym.Wrapper):
         self._prev_power_frac = float(info.get("power_frac", 1.0))
         self._prev_visible_range = None
         self._low_power_visible_steps = 0
+        self._low_power_no_target_steps = 0
         self._annotate_info(info)
         return obs, info
 
@@ -385,15 +543,26 @@ class StagedRewardWrapper(gym.Wrapper):
         shaped += self._locomotion_power_shaping(
             int(action), info, terminated, deltas["distance"]
         )
-        shaped += self._cube_approach_shaping(info, terminated)
+        shaped += self._low_power_no_target_shaping(int(action), info)
+        shaped += self._cube_approach_shaping(
+            info, terminated, truncated, deltas["cube"]
+        )
         self._prev = cur
         self._prev_power_frac = float(info.get("power_frac", self._prev_power_frac))
 
         if terminated and info.get("game_over") == "flipped":
             shaped -= self.flip_penalty
 
+        if (
+            self.stage == "cube_intercept"
+            and float(info.get("episode_cube_pickups", 0.0)) > 0.0
+        ):
+            terminated = True
+            info["game_over"] = "cube_picked_up"
+
         self._annotate_info(info)
         info["low_power_visible_steps"] = self._low_power_visible_steps
+        info["low_power_no_target_steps"] = self._low_power_no_target_steps
         return obs, float(shaped), terminated, truncated, info
 
 
@@ -434,13 +603,25 @@ def make_staged_env(
     cube_spawn_seed: Optional[int] = None,
     terrain_height_scale: Optional[float] = None,
     terrain_height_scale_range: Optional[tuple[float, float]] = None,
+    forced_cube_distance: Optional[float] = None,
+    forced_cube_distance_range: Optional[tuple[float, float]] = None,
+    forced_cube_bearing_deg: Optional[float] = None,
+    forced_cube_bearing_range: Optional[tuple[float, float]] = None,
     scenario: Optional[str] = None,
     locomotion_shaping: str = "off",
     locomotion_coast_bonus: float = 0.35,
     locomotion_power_draw_penalty: float = 40.0,
     locomotion_power_recovery_reward: float = 20.0,
     locomotion_out_of_power_penalty: float = 75.0,
-    cube_shaping: str = "off",
+    low_power_no_target_throttle_penalty: float = 0.25,
+    low_power_no_target_coast_reward: float = 0.02,
+    cube_shaping: Optional[str] = None,
+    low_power_threshold: float = 0.45,
+    cube_approach_reward: float = 0.25,
+    cube_heading_reward: float = 0.05,
+    ignored_cube_penalty: float = 25.0,
+    loss_of_sight_penalty: float = 5.0,
+    intercept_failure_penalty: float = 50.0,
 ) -> gym.Env:
     """Construct a `RoverEnv` configured for `stage` and wrap its reward.
 
@@ -470,7 +651,9 @@ def make_staged_env(
     if power_capacity is None:
         power_capacity = DEFAULT_POWER_CAPACITY_WH
     if power_start_fraction is None:
-        power_start_fraction = 1.0
+        power_start_fraction = 0.35 if stage == "power_idle" else 1.0
+    if cube_shaping is None:
+        cube_shaping = "intercept" if stage == "cube_intercept" else "off"
     if cube_spawn_preset is not None:
         if cube_spawn_preset not in CUBE_SPAWN_PRESETS:
             raise ValueError(
@@ -482,6 +665,11 @@ def make_staged_env(
             cube_spawn_lambda = preset["lambda"]
         if cube_spawn_extent is None:
             cube_spawn_extent = preset["extent"]
+    elif stage in ("cube_intercept", "power_idle"):
+        cube_spawn_preset = "none"
+        cube_spawn_lambda = 0.0 if cube_spawn_lambda is None else cube_spawn_lambda
+        if cube_spawn_extent is None:
+            cube_spawn_extent = DEFAULT_CUBE_SPAWN_EXTENT
     elif stage != "locomotion":
         cube_spawn_preset = "dense_training"
         if cube_spawn_lambda is None:
@@ -490,6 +678,11 @@ def make_staged_env(
             cube_spawn_extent = DEFAULT_CUBE_SPAWN_EXTENT
     else:
         cube_spawn_preset = "sparse_game"
+    if stage == "cube_intercept" and scenario != "no_cube_control":
+        if forced_cube_distance is None and forced_cube_distance_range is None:
+            forced_cube_distance_range = (15.0, 60.0)
+        if forced_cube_bearing_deg is None and forced_cube_bearing_range is None:
+            forced_cube_bearing_range = (-35.0, 35.0)
     env: gym.Env = RoverEnv(
         seed=seed,
         max_steps=max_steps,
@@ -501,6 +694,10 @@ def make_staged_env(
         cube_spawn_seed=cube_spawn_seed,
         terrain_height_scale=terrain_height_scale,
         terrain_height_scale_range=terrain_height_scale_range,
+        forced_cube_distance=forced_cube_distance,
+        forced_cube_distance_range=forced_cube_distance_range,
+        forced_cube_bearing_deg=forced_cube_bearing_deg,
+        forced_cube_bearing_range=forced_cube_bearing_range,
     )
     if frame_skip > 1:
         env = ActionRepeat(env, frame_skip)
@@ -515,5 +712,13 @@ def make_staged_env(
         power_draw_penalty=locomotion_power_draw_penalty,
         power_recovery_reward=locomotion_power_recovery_reward,
         out_of_power_penalty=locomotion_out_of_power_penalty,
+        low_power_no_target_throttle_penalty=low_power_no_target_throttle_penalty,
+        low_power_no_target_coast_reward=low_power_no_target_coast_reward,
         cube_shaping=cube_shaping,
+        low_power_threshold=low_power_threshold,
+        cube_approach_reward=cube_approach_reward,
+        cube_heading_reward=cube_heading_reward,
+        ignored_cube_penalty=ignored_cube_penalty,
+        loss_of_sight_penalty=loss_of_sight_penalty,
+        intercept_failure_penalty=intercept_failure_penalty,
     )

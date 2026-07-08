@@ -82,8 +82,10 @@ Use these run directories:
 
 ```text
 runs/stage0_locomotion
+runs/stage1_cube_intercept
+runs/stage1_power_idle_bc
 runs/stage1_power_cubes
-runs/stage1_power_cubes_transition
+runs/stage1_power_cubes_bridge
 runs/stage2_minerals
 runs/stage3_full
 ```
@@ -205,7 +207,7 @@ python examples/train.py \
   --timesteps "$STAGE0_STEPS" \
   --load runs/stage0_locomotion/best/best_model.zip \
   --vecnorm runs/stage0_locomotion/best/vecnorm.pkl \
-  --preserve-reward-stats \
+  --reset-reward-stats \
   --save runs/stage0_locomotion_continue1 \
   --seed "$SEED" \
   --n-envs "$N_ENVS" \
@@ -386,12 +388,26 @@ cargo run -p hylaeanrover_game --release -- \
 
 ## 8. Record Stage 1 Locomotion Baselines
 
-Evaluate the promoted locomotion policy under the Stage 1 reward and
-the Stage 1 scenarios. These are the baselines the power-cube policy
-must beat.
+Evaluate the promoted locomotion policy under the Stage 1 rewards and
+scenarios. These are baselines, not promotion evidence for Stage 1.
 
 ```bash
-for scenario in dense_training transition sparse_game low_power_start cube_visible_low_power no_cube_control; do
+for scenario in cube_intercept cube_intercept_low_power sparse_visible_low_power; do
+  python examples/evaluate.py \
+    --stage cube_intercept \
+    --load ../models/locomotion/model.zip \
+    --vecnorm ../models/locomotion/vecnorm.pkl \
+    --scenario "$scenario" \
+    --horizon medium \
+    --episodes "$EVAL_EPISODES" \
+    --seed "$SEED" \
+    --frame-skip "$FRAME_SKIP" \
+    --power-capacity "$POWER_CAPACITY" \
+    --cube-shaping off \
+    | tee "runs/reports/stage1_locomotion_baseline_${scenario}.txt"
+done
+
+for scenario in dense_training transition sparse_game sparse_visible_low_power low_power_start cube_visible_low_power no_cube_control; do
   python examples/evaluate.py \
     --stage power_cubes \
     --load ../models/locomotion/model.zip \
@@ -407,16 +423,181 @@ for scenario in dense_training transition sparse_game low_power_start cube_visib
 done
 ```
 
-## 9. Train Stage 1: Power Cubes
+## 9. Train Stage 1A: Cube Intercept
 
-Start dense. Keep low-power shaping on during training.
+Stage 1A trains the missing sensor-to-action skill in isolation: one
+settled, actionable forced cube, no random spawns, fixed observation and
+action spaces. First create and evaluate a behavior-cloned checkpoint.
+Do not start PPO until the BC-only checkpoint can pick up the forced
+cubes with shaping off.
+
+```bash
+python examples/train.py \
+  --stage cube_intercept \
+  --timesteps 0 \
+  --load ../models/locomotion/model.zip \
+  --vecnorm ../models/locomotion/vecnorm.pkl \
+  --reset-reward-stats \
+  --save runs/stage1_cube_intercept_bc \
+  --seed "$SEED" \
+  --n-envs 1 \
+  --frame-skip "$FRAME_SKIP" \
+  --power-capacity "$POWER_CAPACITY" \
+  --horizon short \
+  --scenario cube_intercept \
+  --terrain-height fixed_1_0 \
+  --teacher-pretrain-samples 20000 \
+  --teacher-pretrain-epochs 30 \
+  --teacher-pretrain-batch-size 512 \
+  --teacher-scenarios cube_intercept \
+  --teacher-pretrain-only \
+  --cube-shaping auto \
+  --n-steps 512 \
+  --batch-size 128 \
+  --learning-rate 0.00003 \
+  --clip-range 0.05 \
+  --n-epochs 2 \
+  --target-kl 0.005
+```
+
+If the BC-only checkpoint passes, optionally run a short conservative
+PPO preservation pass. Compare it against the BC checkpoint; use the
+better eval result, not the later checkpoint by default.
+
+```bash
+python examples/train.py \
+  --stage cube_intercept \
+  --timesteps 50000 \
+  --load runs/stage1_cube_intercept_bc/model.zip \
+  --vecnorm runs/stage1_cube_intercept_bc/vecnorm.pkl \
+  --preserve-reward-stats \
+  --save runs/stage1_cube_intercept \
+  --seed "$SEED" \
+  --n-envs 1 \
+  --frame-skip "$FRAME_SKIP" \
+  --power-capacity "$POWER_CAPACITY" \
+  --horizon short \
+  --scenario cube_intercept \
+  --terrain-height fixed_1_0 \
+  --train-scenarios cube_intercept,cube_intercept_low_power \
+  --extra-eval-scenarios cube_intercept_low_power,sparse_visible_low_power,no_cube_control \
+  --cube-shaping auto \
+  --eval-freq 10000 \
+  --n-eval-episodes 10 \
+  --checkpoint-freq 25000 \
+  --learning-rate 0.00001 \
+  --n-steps 512 \
+  --batch-size 128 \
+  --n-epochs 2 \
+  --clip-range 0.05 \
+  --target-kl 0.005
+```
+
+Watch the run:
+
+```bash
+tensorboard --logdir runs/stage1_cube_intercept_bc/tb runs/stage1_cube_intercept/tb
+```
+
+## 10. Evaluate Stage 1A Without Shaping
+
+Acceptance evals must use `--cube-shaping off`.
+
+```bash
+for scenario in cube_intercept cube_intercept_low_power sparse_visible_low_power no_cube_control; do
+  python examples/evaluate.py \
+    --stage cube_intercept \
+    --load runs/stage1_cube_intercept/best/best_model.zip \
+    --vecnorm runs/stage1_cube_intercept/best/vecnorm.pkl \
+    --scenario "$scenario" \
+    --horizon medium \
+    --episodes "$EVAL_EPISODES" \
+    --seed "$SEED" \
+    --frame-skip "$FRAME_SKIP" \
+    --power-capacity "$POWER_CAPACITY" \
+    --cube-shaping off \
+    | tee "runs/reports/stage1_cube_intercept_${scenario}_medium.txt"
+done
+```
+
+Stage 1A can pass only when:
+
+- `cube_intercept` reaches >=0.8 pickups/episode on forced 15-60 m
+  visible cubes.
+- `cube_intercept_low_power` reaches >=0.7 pickups/episode and
+  out-of-power rate <=20%.
+- `sparse_visible_low_power` succeeds with shaping off.
+- Action traces show sustained approach instead of reverse/turn drift.
+
+## 11. Train Stage 1B: Power Idle
+
+Only start this after Stage 1A passes. Warm-start from the intercept
+checkpoint and train low-power no-target discipline with no random cubes
+and no pickup reward. This isolates the broad Stage 1 failure mode where
+the policy keeps throttling after the actionable cube sensor is empty.
+Use teacher pretraining first: it gives direct coast labels for no-cube
+low-power observations and visible-cube intercept labels to avoid
+forgetting the Stage 1A skill.
+
+```bash
+python examples/train.py \
+  --stage power_idle \
+  --timesteps 0 \
+  --load runs/stage1_cube_intercept/best/best_model.zip \
+  --vecnorm runs/stage1_cube_intercept/best/vecnorm.pkl \
+  --reset-reward-stats \
+  --save runs/stage1_power_idle_bc \
+  --seed "$SEED" \
+  --n-envs 1 \
+  --frame-skip "$FRAME_SKIP" \
+  --power-capacity "$POWER_CAPACITY" \
+  --horizon short \
+  --scenario power_idle \
+  --teacher-pretrain-samples 20000 \
+  --teacher-pretrain-epochs 10 \
+  --teacher-pretrain-batch-size 512 \
+  --teacher-scenarios power_idle,cube_intercept_low_power \
+  --teacher-pretrain-only
+```
+
+Evaluate the idle gate:
+
+```bash
+for scenario in power_idle no_cube_control; do
+  python examples/evaluate.py \
+    --stage power_idle \
+    --load runs/stage1_power_idle_bc/best/best_model.zip \
+    --vecnorm runs/stage1_power_idle_bc/best/vecnorm.pkl \
+    --scenario "$scenario" \
+    --horizon medium \
+    --episodes "$EVAL_EPISODES" \
+    --seed "$SEED" \
+    --frame-skip "$FRAME_SKIP" \
+    --power-capacity "$POWER_CAPACITY" \
+    --cube-shaping off \
+    | tee "runs/reports/stage1_power_idle_bc_${scenario}_medium.txt"
+done
+```
+
+Stage 1B can pass only when `power_idle` and `no_cube_control` have
+out-of-power rate <=20% over a medium-horizon batch.
+
+## 12. Train Stage 1C: Power Cubes
+
+Only start broad power-cube training after Stage 1A and Stage 1B pass.
+Warm-start from the idle BC checkpoint and mix dense, bridge, transition,
+sparse-visible, and sparse-game scenarios. Dense pickup success alone is
+not promotable. Stage 1C uses zero distance reward in `power_cubes`; the
+travel objective returns in later stages after visible-cube pickup is
+reliable. `--train-scenarios` assigns scenarios to vector-env workers, so
+set `N_ENVS` to at least the number of listed scenarios.
 
 ```bash
 python examples/train.py \
   --stage power_cubes \
   --timesteps "$STAGE1_STEPS" \
-  --load ../models/locomotion/model.zip \
-  --vecnorm ../models/locomotion/vecnorm.pkl \
+  --load runs/stage1_power_idle_bc/best/best_model.zip \
+  --vecnorm runs/stage1_power_idle_bc/best/vecnorm.pkl \
   --reset-reward-stats \
   --save runs/stage1_power_cubes \
   --seed "$SEED" \
@@ -424,29 +605,24 @@ python examples/train.py \
   --frame-skip "$FRAME_SKIP" \
   --power-capacity "$POWER_CAPACITY" \
   --horizon short \
-  --scenario dense_training \
-  --extra-eval-scenarios transition,sparse_game,low_power_start,cube_visible_low_power,no_cube_control \
+  --scenario sparse_visible_low_power \
+  --train-scenarios dense_training,bridge_low_power,transition,sparse_visible_low_power,sparse_low_power,no_cube_control \
+  --extra-eval-scenarios sparse_visible_low_power,sparse_visible_reset,sparse_game,transition,dense_training,no_cube_control \
   --cube-spawn-seed "$SEED" \
-  --cube-shaping auto \
+  --cube-shaping intercept \
   --eval-freq 25000 \
   --n-eval-episodes 10 \
   --checkpoint-freq 100000 \
+  --learning-rate 0.00002 \
+  --n-epochs 4 \
   --ent-coef 0.01 \
-  --target-kl 0.02
+  --target-kl 0.015
 ```
 
-Watch the run:
+Evaluate Stage 1C with shaping off:
 
 ```bash
-tensorboard --logdir runs/stage1_power_cubes/tb
-```
-
-## 10. Evaluate Stage 1 Without Shaping
-
-Acceptance evals should use `--cube-shaping off`.
-
-```bash
-for scenario in dense_training transition sparse_game low_power_start cube_visible_low_power no_cube_control; do
+for scenario in sparse_visible_low_power sparse_visible_reset sparse_game transition bridge_low_power dense_training no_cube_control; do
   python examples/evaluate.py \
     --stage power_cubes \
     --load runs/stage1_power_cubes/best/best_model.zip \
@@ -458,11 +634,11 @@ for scenario in dense_training transition sparse_game low_power_start cube_visib
     --frame-skip "$FRAME_SKIP" \
     --power-capacity "$POWER_CAPACITY" \
     --cube-shaping off \
-    | tee "runs/reports/stage1_best_${scenario}_medium.txt"
+    | tee "runs/reports/stage1_power_cubes_${scenario}_medium.txt"
 done
 ```
 
-Run sparse long-horizon samples.
+Run sparse long-horizon samples before promotion:
 
 ```bash
 python examples/evaluate.py \
@@ -476,55 +652,21 @@ python examples/evaluate.py \
   --frame-skip "$FRAME_SKIP" \
   --power-capacity "$POWER_CAPACITY" \
   --cube-shaping off \
-  | tee runs/reports/stage1_best_sparse_game_long.txt
+  | tee runs/reports/stage1_power_cubes_sparse_game_long.txt
 ```
 
-Stage 1 can pass when it beats the Stage 1 locomotion baselines on:
+Stage 1C can pass when it beats the Stage 1 locomotion baselines on:
 
-- cube pickups in `dense_training` and `transition`;
-- end power fraction in `transition`, `low_power_start`, and
-  `cube_visible_low_power`;
-- out-of-power rate in power-pressure scenarios;
-- nonzero sparse-game pickups over a meaningful eval batch;
-- visible-cube approach rate when power is low;
+- no-shaping pickups in `sparse_visible_low_power`, `dense_training`, and
+  `transition`;
+- nonzero sparse-game pickups over a meaningful medium-horizon batch;
+- end power and out-of-power rate in power-pressure scenarios;
 - no-cube control behavior without fake pickup reward.
 
-## 11. Continue Stage 1 on Transition if Needed
+## 13. Promote Stage 1
 
-Use this if dense training improves but transition or sparse evals are
-still weak.
-
-```bash
-python examples/train.py \
-  --stage power_cubes \
-  --timesteps "$STAGE1_STEPS" \
-  --load runs/stage1_power_cubes/best/best_model.zip \
-  --vecnorm runs/stage1_power_cubes/best/vecnorm.pkl \
-  --preserve-reward-stats \
-  --save runs/stage1_power_cubes_transition \
-  --seed "$SEED" \
-  --n-envs "$N_ENVS" \
-  --frame-skip "$FRAME_SKIP" \
-  --power-capacity "$POWER_CAPACITY" \
-  --horizon short \
-  --scenario transition \
-  --extra-eval-scenarios dense_training,sparse_game,low_power_start,cube_visible_low_power,no_cube_control \
-  --cube-spawn-seed "$SEED" \
-  --cube-shaping auto \
-  --eval-freq 25000 \
-  --n-eval-episodes 10 \
-  --checkpoint-freq 100000 \
-  --ent-coef 0.01 \
-  --target-kl 0.02
-```
-
-Evaluate the transition continuation with the same commands from Step 10,
-replacing `runs/stage1_power_cubes` with
-`runs/stage1_power_cubes_transition`.
-
-## 12. Promote Stage 1
-
-Only promote after the Stage 1 gates pass and the reports are recorded.
+Only promote after Stage 1A, Stage 1B, and Stage 1C gates pass and the
+reports are recorded.
 
 ```bash
 python examples/promote_model.py \
@@ -534,21 +676,11 @@ python examples/promote_model.py \
   --frame-skip "$FRAME_SKIP"
 ```
 
-If the transition continuation is the accepted run, promote that run
-instead:
+If a later Stage 1C continuation is the accepted run, promote that run
+instead. Do not start minerals until `../models/power_cubes/` comes from
+a run that passed the Stage 1 gates.
 
-```bash
-python examples/promote_model.py \
-  --stage power_cubes \
-  --run runs/stage1_power_cubes_transition \
-  --source best \
-  --frame-skip "$FRAME_SKIP"
-```
-
-Do not start minerals until `../models/power_cubes/` comes from a run
-that passed the Stage 1 gates.
-
-## 13. Record Stage 2 Baselines
+## 14. Record Stage 2 Baselines
 
 Evaluate the promoted power-cube policy under the Stage 2 reward. Stage
 2 must improve mineral integral without badly regressing cube behavior.
@@ -585,7 +717,7 @@ for scenario in transition sparse_game; do
 done
 ```
 
-## 14. Train Stage 2: Minerals
+## 15. Train Stage 2: Minerals
 
 Warm-start from the accepted power-cube model.
 
@@ -611,7 +743,7 @@ python examples/train.py \
   --target-kl 0.02
 ```
 
-## 15. Evaluate Stage 2
+## 16. Evaluate Stage 2
 
 ```bash
 for scenario in terrain_mixed_1_2 transition sparse_game terrain_fixed_1_0 terrain_fixed_1_5 terrain_fixed_2_0; do
@@ -652,7 +784,7 @@ Stage 2 can pass when:
 - distance and flip rate remain acceptable;
 - medium and sampled long horizons do not expose a new terminal failure.
 
-## 16. Promote Stage 2
+## 17. Promote Stage 2
 
 ```bash
 python examples/promote_model.py \
@@ -662,7 +794,7 @@ python examples/promote_model.py \
   --frame-skip "$FRAME_SKIP"
 ```
 
-## 17. Record Stage 3 Baselines
+## 18. Record Stage 3 Baselines
 
 Evaluate the promoted minerals policy under the full reward with beacons
 enabled.
@@ -681,7 +813,7 @@ python examples/evaluate.py \
   | tee runs/reports/stage3_minerals_baseline_medium.txt
 ```
 
-## 18. Train Stage 3: Full
+## 19. Train Stage 3: Full
 
 Warm-start from the accepted minerals model.
 
@@ -707,7 +839,7 @@ python examples/train.py \
   --target-kl 0.02
 ```
 
-## 19. Evaluate Stage 3
+## 20. Evaluate Stage 3
 
 ```bash
 for scenario in terrain_mixed_1_2 transition sparse_game terrain_fixed_1_0 terrain_fixed_1_5 terrain_fixed_2_0; do
@@ -748,7 +880,7 @@ Stage 3 can pass when:
 - mineral and cube metrics do not collapse;
 - distance, power survival, and flip rate remain acceptable.
 
-## 20. Promote Stage 3
+## 21. Promote Stage 3
 
 ```bash
 python examples/promote_model.py \
@@ -758,7 +890,7 @@ python examples/promote_model.py \
   --frame-skip "$FRAME_SKIP"
 ```
 
-## 21. Export and Watch Policies
+## 22. Export and Watch Policies
 
 Promotion already creates `model.onnx` and `model.norm.json` in
 `../models/<stage>/`. Run the game with a promoted model:
@@ -789,7 +921,7 @@ cargo run -p hylaeanrover_game --release -- \
 In the game, press `P` to toggle autopilot and `O` to reload the ONNX
 file after exporting a newer checkpoint.
 
-## 22. Final Verification Checklist
+## 23. Final Verification Checklist
 
 Run this before committing promoted models:
 
@@ -819,7 +951,7 @@ cargo test --workspace
 cargo clippy --workspace --tests
 ```
 
-## 23. Commit the Accepted Bundles
+## 24. Commit the Accepted Bundles
 
 After all gates pass:
 
@@ -845,11 +977,24 @@ Use these with `--scenario`:
 | `terrain_fixed_2_0` | High terrain eval |
 | `terrain_mixed_1_2` | Reset-time terrain randomization |
 | `dense_training` | Stage 1 positive pickup signal |
+| `bridge_training` | Intermediate density bridge eval |
+| `bridge_low_power` | Low-power training bridge before transition |
 | `transition` | Bridge from dense training to sparse game |
 | `sparse_game` | Deployment-like cube density |
+| `sparse_low_power` | Sparse cubes with low-power start |
+| `sparse_visible_reset` | Sparse spawn plus one reset-time visible cube |
+| `sparse_visible_low_power` | Low-power sparse-visible intercept diagnostic |
 | `low_power_start` | Starts near low power with transition cubes |
 | `cube_visible_low_power` | Low power with likely visible cube |
 | `no_cube_control` | Low-power negative control with no cubes |
+
+Use these with `--cube-shaping`:
+
+| Mode | Main use |
+|---|---|
+| `off` | Acceptance evals |
+| `low_power` | Reward visible-cube range reduction only under low power |
+| `intercept` | Reward visible-cube alignment/range reduction before low power |
 
 Use these with `--horizon`:
 
@@ -864,6 +1009,7 @@ Use these with `--cube-spawn-preset` when overriding a scenario:
 | Preset | Main use |
 |---|---|
 | `dense_training` | Frequent reachable cubes |
+| `bridge_training` | Intermediate density and search radius |
 | `transition` | Near-sparse bridge |
 | `sparse_game` | Game-like sparse lifelines |
 | `none` | No-cube control |

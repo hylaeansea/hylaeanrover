@@ -54,6 +54,10 @@ class RoverEnv(gym.Env):
         cube_spawn_seed: Optional[int] = None,
         terrain_height_scale: Optional[float] = None,
         terrain_height_scale_range: Optional[tuple[float, float]] = None,
+        forced_cube_distance: Optional[float] = None,
+        forced_cube_distance_range: Optional[tuple[float, float]] = None,
+        forced_cube_bearing_deg: Optional[float] = None,
+        forced_cube_bearing_range: Optional[tuple[float, float]] = None,
     ) -> None:
         super().__init__()
         if render_mode is not None and render_mode != "rgb_array":
@@ -84,6 +88,10 @@ class RoverEnv(gym.Env):
         self.cube_spawn_seed = cube_spawn_seed
         self.terrain_height_scale = terrain_height_scale
         self.terrain_height_scale_range = terrain_height_scale_range
+        self.forced_cube_distance = forced_cube_distance
+        self.forced_cube_distance_range = forced_cube_distance_range
+        self.forced_cube_bearing_deg = forced_cube_bearing_deg
+        self.forced_cube_bearing_range = forced_cube_bearing_range
 
         self._env = _RustRoverEnv(
             seed=seed,
@@ -136,8 +144,27 @@ class RoverEnv(gym.Env):
         power_start_fraction = options.get(
             "power_start_fraction", self.power_start_fraction
         )
+        forced_cube_distance = options.get(
+            "forced_cube_distance", self.forced_cube_distance
+        )
+        if forced_cube_distance is None and self.forced_cube_distance_range is not None:
+            lo, hi = self.forced_cube_distance_range
+            forced_cube_distance = float(self.np_random.uniform(lo, hi))
+        forced_cube_bearing_deg = options.get(
+            "forced_cube_bearing_deg", self.forced_cube_bearing_deg
+        )
+        if (
+            forced_cube_bearing_deg is None
+            and self.forced_cube_bearing_range is not None
+        ):
+            lo, hi = self.forced_cube_bearing_range
+            forced_cube_bearing_deg = float(self.np_random.uniform(lo, hi))
         obs_list, info_json = self._env.reset(
-            terrain_seed, terrain_height_scale, power_start_fraction
+            terrain_seed,
+            terrain_height_scale,
+            power_start_fraction,
+            forced_cube_distance,
+            forced_cube_bearing_deg,
         )
         obs = np.asarray(obs_list, dtype=np.float32)
         info = json.loads(info_json) if info_json else {}

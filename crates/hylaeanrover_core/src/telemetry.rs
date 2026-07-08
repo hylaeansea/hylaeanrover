@@ -35,6 +35,10 @@ pub struct RoverTelemetry {
     /// Closest-first list of visible cubes (already filtered by cone
     /// + line-of-sight in the cube sensor system).
     pub visible_cubes: Vec<CubeTelemetry>,
+    /// Debug-only native sensor state for the nearest cube before the
+    /// actionability filter is applied. Not included in the RL observation.
+    pub nearest_cube_height_above_ground_m: Option<f32>,
+    pub nearest_cube_actionable: bool,
 }
 
 #[derive(Serialize, Default, Clone, Copy)]

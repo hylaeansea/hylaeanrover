@@ -37,7 +37,9 @@ use bevy::time::TimeUpdateStrategy;
 use bevy::transform::TransformPlugin;
 
 use hylaeanrover_core::game_state::{GameOverReason, GameState, GameStatus};
-use hylaeanrover_core::power_cubes::{PowerCubeRng, PowerState, RelaunchEvent};
+use hylaeanrover_core::power_cubes::{
+    ForcedPowerCubeSpawn, PowerCubeRng, PowerState, RelaunchEvent,
+};
 use hylaeanrover_core::reward::{BEACON_BUDGET, RewardState};
 use hylaeanrover_core::telemetry::RoverTelemetry;
 use hylaeanrover_core::terrain_controls::TerrainState;
@@ -74,6 +76,8 @@ struct EnvInner {
     cube_spawn_seed: Option<u64>,
     cube_spawn_lambda: f32,
     cube_spawn_extent: f32,
+    forced_cube_distance: Option<f32>,
+    forced_cube_bearing_deg: Option<f32>,
     /// `RewardState.total()` from the previous step, so we can compute
     /// the per-step reward delta SB3 wants.
     last_total_reward: f32,
@@ -164,6 +168,8 @@ impl EnvInner {
             cube_spawn_seed,
             cube_spawn_lambda: core_cfg.cube_spawn_lambda,
             cube_spawn_extent: core_cfg.cube_spawn_extent,
+            forced_cube_distance: None,
+            forced_cube_bearing_deg: None,
             last_total_reward: 0.0,
         }
     }
@@ -256,6 +262,30 @@ impl EnvInner {
         if let Some(mut rng) = self.app.world_mut().get_resource_mut::<PowerCubeRng>() {
             rng.reseed(cube_seed);
         }
+    }
+
+    fn request_forced_cube(&mut self, distance_m: f32, bearing_deg: f32) {
+        if let Some(mut forced) = self
+            .app
+            .world_mut()
+            .get_resource_mut::<ForcedPowerCubeSpawn>()
+        {
+            forced.request(distance_m, bearing_deg);
+        }
+        self.forced_cube_distance = Some(distance_m);
+        self.forced_cube_bearing_deg = Some(bearing_deg);
+    }
+
+    fn clear_forced_cube_info(&mut self) {
+        if let Some(mut forced) = self
+            .app
+            .world_mut()
+            .get_resource_mut::<ForcedPowerCubeSpawn>()
+        {
+            forced.clear();
+        }
+        self.forced_cube_distance = None;
+        self.forced_cube_bearing_deg = None;
     }
 }
 
@@ -361,13 +391,15 @@ impl RoverEnv {
 
     /// Reset the episode. Mirrors gym's `reset` contract: returns
     /// `(observation, info_dict_as_json_string)`.
-    #[pyo3(signature = (seed = None, terrain_height_scale = None, power_start_fraction = None))]
+    #[pyo3(signature = (seed = None, terrain_height_scale = None, power_start_fraction = None, forced_cube_distance = None, forced_cube_bearing_deg = None))]
     fn reset(
         &self,
         _py: Python<'_>,
         seed: Option<u64>,
         terrain_height_scale: Option<f32>,
         power_start_fraction: Option<f32>,
+        forced_cube_distance: Option<f32>,
+        forced_cube_bearing_deg: Option<f32>,
     ) -> PyResult<(Vec<f32>, String)> {
         let mut inner = self.inner.borrow_mut();
         if let Some(scale) = terrain_height_scale
@@ -384,6 +416,27 @@ impl RoverEnv {
                 "power_start_fraction must be a finite value in [0, 1]",
             ));
         }
+        let forced_cube = match (forced_cube_distance, forced_cube_bearing_deg) {
+            (Some(distance), Some(bearing)) => {
+                if !distance.is_finite() || distance <= 0.0 {
+                    return Err(pyo3::exceptions::PyValueError::new_err(
+                        "forced_cube_distance must be a positive finite value",
+                    ));
+                }
+                if !bearing.is_finite() || bearing.abs() > 60.0 {
+                    return Err(pyo3::exceptions::PyValueError::new_err(
+                        "forced_cube_bearing_deg must be finite and within the ±60° cube sensor cone",
+                    ));
+                }
+                Some((distance, bearing))
+            }
+            (None, None) => None,
+            _ => {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "forced_cube_distance and forced_cube_bearing_deg must be provided together",
+                ));
+            }
+        };
 
         // Send a relaunch event — the existing reward/game_state/beacon/
         // power systems all listen for this and reset cleanly.
@@ -412,6 +465,20 @@ impl RoverEnv {
         let power_start_fraction = inner.power_start_fraction;
         if let Some(mut power) = inner.app.world_mut().get_resource_mut::<PowerState>() {
             power.set_fraction(power_start_fraction);
+        }
+        inner.clear_forced_cube_info();
+        if let Some((distance, bearing)) = forced_cube {
+            inner.request_forced_cube(distance, bearing);
+            // The spawn system runs through Commands, so use a few ticks:
+            // request -> spawn command -> command apply -> sensor update.
+            for _ in 0..3 {
+                inner.app.update();
+            }
+            // The extra settle ticks above should not spend the scenario's
+            // low-power budget before the policy receives its first obs.
+            if let Some(mut power) = inner.app.world_mut().get_resource_mut::<PowerState>() {
+                power.set_fraction(power_start_fraction);
+            }
         }
 
         inner.step_count = 0;
@@ -549,6 +616,20 @@ fn make_info(inner: &EnvInner) -> String {
         "cube_spawn_extent".into(),
         serde_json::Value::from(inner.cube_spawn_extent),
     );
+    map.insert(
+        "forced_cube_distance".into(),
+        inner
+            .forced_cube_distance
+            .map(serde_json::Value::from)
+            .unwrap_or(serde_json::Value::Null),
+    );
+    map.insert(
+        "forced_cube_bearing_deg".into(),
+        inner
+            .forced_cube_bearing_deg
+            .map(serde_json::Value::from)
+            .unwrap_or(serde_json::Value::Null),
+    );
     if let Some(rng) = world.get_resource::<PowerCubeRng>() {
         map.insert(
             "cube_spawn_seed".into(),
@@ -565,6 +646,17 @@ fn make_info(inner: &EnvInner) -> String {
     map.insert(
         "visible_cube_count".into(),
         serde_json::Value::from(telemetry.visible_cubes.len()),
+    );
+    map.insert(
+        "nearest_cube_height_above_ground_m".into(),
+        telemetry
+            .nearest_cube_height_above_ground_m
+            .map(serde_json::Value::from)
+            .unwrap_or(serde_json::Value::Null),
+    );
+    map.insert(
+        "nearest_cube_actionable".into(),
+        serde_json::Value::from(telemetry.nearest_cube_actionable),
     );
     if let Some(nearest) = telemetry.visible_cubes.first() {
         map.insert(
