@@ -26,6 +26,10 @@ const BUTTON_BG_HOVER: Color = Color::srgba(0.10, 0.20, 0.28, 1.0);
 const SCALE_MIN: f32 = 0.05;
 const SCALE_MAX: f32 = 5.0;
 
+/// Initial terrain height scale supplied by `RoverCoreConfig`.
+#[derive(Resource, Clone, Copy)]
+struct InitialTerrainHeightScale(f32);
+
 /// Marker on the terrain mesh entity so rebuilds can find and despawn it.
 #[derive(Component)]
 pub struct TerrainEntity;
@@ -103,20 +107,33 @@ struct SeedValueText;
 #[derive(Component)]
 struct RandomizeSeedButton;
 
-pub struct TerrainControlsPlugin;
+pub struct TerrainControlsPlugin {
+    pub initial_height_scale: f32,
+}
+
+impl Default for TerrainControlsPlugin {
+    fn default() -> Self {
+        Self {
+            initial_height_scale: 1.0,
+        }
+    }
+}
 
 impl Plugin for TerrainControlsPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, (setup_terrain, setup_ui))
-            .add_systems(
-                Update,
-                (
-                    handle_scale_buttons,
-                    handle_randomize_button,
-                    rebuild_terrain,
-                    sync_ui_to_state,
-                ),
-            );
+        app.insert_resource(InitialTerrainHeightScale(
+            self.initial_height_scale.clamp(SCALE_MIN, SCALE_MAX),
+        ))
+        .add_systems(Startup, (setup_terrain, setup_ui))
+        .add_systems(
+            Update,
+            (
+                handle_scale_buttons,
+                handle_randomize_button,
+                rebuild_terrain,
+                sync_ui_to_state,
+            ),
+        );
     }
 }
 
@@ -143,10 +160,12 @@ fn setup_terrain(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    initial_scale: Res<InitialTerrainHeightScale>,
 ) {
     let cfg = LunarTerrainConfig::default();
     let terrain = LunarTerrain::generate(cfg);
     let base_heights = terrain.heights.clone();
+    let height_scale = initial_scale.0;
 
     let mut state = TerrainState {
         seed: cfg.seed,
@@ -154,8 +173,8 @@ fn setup_terrain(
         resolution: cfg.resolution,
         crater_count: cfg.crater_count,
         base_heights,
-        height_scale: 1.0,
-        last_built_scale: 1.0,
+        height_scale,
+        last_built_scale: height_scale,
         last_built_seed: cfg.seed,
         terrain_entity: None,
         mesh_handle: None,

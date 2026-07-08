@@ -48,6 +48,16 @@ class RoverEnv(gym.Env):
         render_mode: Optional[str] = None,
         beacons_enabled: bool = True,
         power_capacity: Optional[float] = None,
+        power_start_fraction: float = 1.0,
+        cube_spawn_lambda: Optional[float] = None,
+        cube_spawn_extent: Optional[float] = None,
+        cube_spawn_seed: Optional[int] = None,
+        terrain_height_scale: Optional[float] = None,
+        terrain_height_scale_range: Optional[tuple[float, float]] = None,
+        forced_cube_distance: Optional[float] = None,
+        forced_cube_distance_range: Optional[tuple[float, float]] = None,
+        forced_cube_bearing_deg: Optional[float] = None,
+        forced_cube_bearing_range: Optional[tuple[float, float]] = None,
     ) -> None:
         super().__init__()
         if render_mode is not None and render_mode != "rgb_array":
@@ -68,12 +78,31 @@ class RoverEnv(gym.Env):
         # Training passes a small value so the power budget binds within
         # one episode. The battery refills on every reset().
         self.power_capacity = power_capacity
+        self.power_start_fraction = power_start_fraction
+        # Power-cube Poisson spawn rate (cubes/sec) / spawn region
+        # half-width (m); None keeps the game's defaults. The power_cubes
+        # curriculum stage raises the rate and shrinks the region so a
+        # short episode has enough reachable cubes to learn seek behavior.
+        self.cube_spawn_lambda = cube_spawn_lambda
+        self.cube_spawn_extent = cube_spawn_extent
+        self.cube_spawn_seed = cube_spawn_seed
+        self.terrain_height_scale = terrain_height_scale
+        self.terrain_height_scale_range = terrain_height_scale_range
+        self.forced_cube_distance = forced_cube_distance
+        self.forced_cube_distance_range = forced_cube_distance_range
+        self.forced_cube_bearing_deg = forced_cube_bearing_deg
+        self.forced_cube_bearing_range = forced_cube_bearing_range
 
         self._env = _RustRoverEnv(
             seed=seed,
             max_steps=max_steps,
             beacons_enabled=beacons_enabled,
             power_capacity=power_capacity,
+            power_start_fraction=power_start_fraction,
+            cube_spawn_lambda=cube_spawn_lambda,
+            cube_spawn_extent=cube_spawn_extent,
+            cube_spawn_seed=cube_spawn_seed,
+            terrain_height_scale=terrain_height_scale,
         )
         self._obs_dim = _RustRoverEnv.obs_dim()
         self._action_count = _RustRoverEnv.action_count()
@@ -95,7 +124,7 @@ class RoverEnv(gym.Env):
         seed: Optional[int] = None,
         options: Optional[dict[str, Any]] = None,
     ) -> tuple[np.ndarray, dict[str, Any]]:
-        del options  # not used (kept for the gymnasium signature)
+        options = options or {}
         # Seed the gym RNG (deterministic iff `seed` is given), then draw a
         # fresh terrain seed from it for *every* episode. SB3's autoreset
         # calls reset() with seed=None; without this, np_random would not
@@ -106,19 +135,45 @@ class RoverEnv(gym.Env):
         # domain randomization) when it isn't.
         super().reset(seed=seed)
         terrain_seed = int(self.np_random.integers(0, 2**31 - 1))
-        obs_list, info_json = self._env.reset(terrain_seed)
+        terrain_height_scale = options.get("terrain_height_scale")
+        if terrain_height_scale is None and self.terrain_height_scale_range is not None:
+            lo, hi = self.terrain_height_scale_range
+            terrain_height_scale = float(self.np_random.uniform(lo, hi))
+        if terrain_height_scale is None:
+            terrain_height_scale = self.terrain_height_scale
+        power_start_fraction = options.get(
+            "power_start_fraction", self.power_start_fraction
+        )
+        forced_cube_distance = options.get(
+            "forced_cube_distance", self.forced_cube_distance
+        )
+        if forced_cube_distance is None and self.forced_cube_distance_range is not None:
+            lo, hi = self.forced_cube_distance_range
+            forced_cube_distance = float(self.np_random.uniform(lo, hi))
+        forced_cube_bearing_deg = options.get(
+            "forced_cube_bearing_deg", self.forced_cube_bearing_deg
+        )
+        if (
+            forced_cube_bearing_deg is None
+            and self.forced_cube_bearing_range is not None
+        ):
+            lo, hi = self.forced_cube_bearing_range
+            forced_cube_bearing_deg = float(self.np_random.uniform(lo, hi))
+        obs_list, info_json = self._env.reset(
+            terrain_seed,
+            terrain_height_scale,
+            power_start_fraction,
+            forced_cube_distance,
+            forced_cube_bearing_deg,
+        )
         obs = np.asarray(obs_list, dtype=np.float32)
         info = json.loads(info_json) if info_json else {}
         return obs, info
 
-    def step(
-        self, action: int
-    ) -> tuple[np.ndarray, float, bool, bool, dict[str, Any]]:
+    def step(self, action: int) -> tuple[np.ndarray, float, bool, bool, dict[str, Any]]:
         # SB3 + gymnasium hand us numpy scalars sometimes — coerce.
         action_int = int(action)
-        obs_list, reward, terminated, truncated, info_json = self._env.step(
-            action_int
-        )
+        obs_list, reward, terminated, truncated, info_json = self._env.step(action_int)
         obs = np.asarray(obs_list, dtype=np.float32)
         info = json.loads(info_json) if info_json else {}
         return obs, float(reward), bool(terminated), bool(truncated), info

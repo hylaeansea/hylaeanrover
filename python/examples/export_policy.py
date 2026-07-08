@@ -9,6 +9,7 @@ Produces, next to the chosen `.onnx` path:
 Example::
 
     python examples/export_policy.py \
+        --stage locomotion \
         --model runs/stage0/model.zip --vecnorm runs/stage0/vecnorm.pkl
 
 Then watch it drive in the full game::
@@ -32,17 +33,32 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--model", required=True, help="trained model.zip")
     p.add_argument("--vecnorm", required=True, help="matching vecnorm.pkl")
-    p.add_argument("--stage", choices=STAGES, default="full", help="env stage for the dummy obs")
-    p.add_argument("--out", default=None, help="output .onnx path (default: alongside model)")
+    p.add_argument(
+        "--stage",
+        choices=STAGES,
+        required=True,
+        help="stage the checkpoint was trained for; controls exported runtime config",
+    )
+    p.add_argument(
+        "--out", default=None, help="output .onnx path (default: alongside model)"
+    )
     p.add_argument("--opset", type=int, default=17)
-    p.add_argument("--frame-skip", type=int, default=1,
-                   help="frame-skip used in training; recorded so the autopilot matches it")
+    p.add_argument(
+        "--frame-skip",
+        type=int,
+        default=1,
+        help="frame-skip used in training; recorded so the autopilot matches it",
+    )
     args = p.parse_args()
 
     out_onnx = Path(args.out) if args.out else Path(args.model).with_suffix(".onnx")
     onnx, norm = export_policy(
-        args.model, args.vecnorm, out_onnx,
-        stage=args.stage, frame_skip=args.frame_skip, opset=args.opset,
+        args.model,
+        args.vecnorm,
+        out_onnx,
+        stage=args.stage,
+        frame_skip=args.frame_skip,
+        opset=args.opset,
     )
     print(f"Wrote {onnx}")
     print(f"Wrote {norm}")

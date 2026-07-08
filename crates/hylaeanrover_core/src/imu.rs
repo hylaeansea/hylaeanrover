@@ -28,6 +28,7 @@ use bevy_rapier3d::prelude::*;
 
 use crate::power_cubes::PowerCube;
 use crate::telemetry::{CubeTelemetry, ImuTelemetry, RoverTelemetry, round1, round2};
+use crate::terrain_controls::TerrainState;
 use crate::ui::{LeftSidebar, LeftSidebarSet, UiFont};
 use crate::{ChassisEntity, ROVER_GROUP};
 
@@ -78,6 +79,12 @@ const ACCEL_SMOOTH_TAU: f32 = 0.10;
 const VIEW_HALF_ANGLE_DEG: f32 = 60.0;
 /// Cube sensor: pool size.
 const MAX_VISIBLE_CUBES: usize = 6;
+/// A cube must be near terrain before the RL-visible sensor reports it.
+/// Falling cubes are visible to a human, but not yet collectible by the
+/// rover; exposing them as normal bearing/range targets made Stage 1
+/// partially unobservable because pickup uses full 3D distance.
+const ACTIONABLE_CUBE_HEIGHT_ABOVE_TERRAIN_M: f32 = 2.5;
+const MIN_ACTIONABLE_CUBE_HEIGHT_ABOVE_TERRAIN_M: f32 = -0.25;
 
 // ---- Plugin --------------------------------------------------------------
 
@@ -467,12 +474,15 @@ fn sync_cube_sensor_ui(
     chassis_res: Res<ChassisEntity>,
     xforms: Query<&GlobalTransform>,
     cubes: Query<(Entity, &GlobalTransform), With<PowerCube>>,
+    terrain: Option<Res<TerrainState>>,
     rapier: ReadRapierContext,
     mut angle_texts: Query<(&CubeRowAngle, &mut Text), Without<CubeRowDist>>,
     mut dist_texts: Query<(&CubeRowDist, &mut Text), Without<CubeRowAngle>>,
     mut telemetry: ResMut<RoverTelemetry>,
 ) {
     let mut visible: Vec<(f32, f32)> = Vec::new();
+    telemetry.nearest_cube_height_above_ground_m = None;
+    telemetry.nearest_cube_actionable = false;
 
     if let Some(chassis_id) = chassis_res.0
         && let Ok(chassis_gxf) = xforms.get(chassis_id)
@@ -485,6 +495,7 @@ fn sync_cube_sensor_ui(
         if fwd.length_squared() >= 1e-6 {
             let fwd = fwd.normalize();
             let filter = rover_excluded_filter();
+            let mut nearest_any_xz = f32::INFINITY;
 
             for (cube_entity, cube_gxf) in cubes.iter() {
                 let cube_pos = cube_gxf.translation();
@@ -492,6 +503,16 @@ fn sync_cube_sensor_ui(
                 let delta = Vec2::new(delta3.x, delta3.z);
                 let dist_xz = delta.length();
                 if dist_xz < 1e-3 {
+                    continue;
+                }
+                let (actionable, height_above_ground) =
+                    cube_actionability(cube_pos, terrain.as_deref());
+                if dist_xz < nearest_any_xz {
+                    nearest_any_xz = dist_xz;
+                    telemetry.nearest_cube_height_above_ground_m = height_above_ground.map(round2);
+                    telemetry.nearest_cube_actionable = actionable;
+                }
+                if !actionable {
                     continue;
                 }
                 let to_cube = delta / dist_xz;
@@ -544,4 +565,15 @@ fn sync_cube_sensor_ui(
             distance_m: round1(distance_m),
         })
         .collect();
+}
+
+fn cube_actionability(cube_pos: Vec3, terrain: Option<&TerrainState>) -> (bool, Option<f32>) {
+    let Some(terrain) = terrain else {
+        return (true, None);
+    };
+    let height_above_ground = cube_pos.y - terrain.height_at(cube_pos.x, cube_pos.z);
+    let actionable = (MIN_ACTIONABLE_CUBE_HEIGHT_ABOVE_TERRAIN_M
+        ..=ACTIONABLE_CUBE_HEIGHT_ABOVE_TERRAIN_M)
+        .contains(&height_above_ground);
+    (actionable, Some(height_above_ground))
 }

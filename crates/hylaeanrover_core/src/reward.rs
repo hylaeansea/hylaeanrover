@@ -1,6 +1,6 @@
 //! Reward function for the rover game / RL environment.
 //!
-//! Three additive components, all stored on `RewardState`:
+//! Four additive components, all stored on `RewardState`:
 //!
 //!   - **distance**       — `+1` per meter the chassis has moved.
 //!   - **mineral integral** — line integral over the rover's path. Each
@@ -17,6 +17,10 @@
 //!     `BEACON_BUDGET`), credits `BEACON_MULTIPLIER · Σ scarcity[i] ·
 //!     (subsurface[i] / base[i])` once. Subsurface is the *hidden*
 //!     map — beacons reward strategic guessing from surface trends.
+//!   - **cube bonus**      — `CUBE_PICKUP_BONUS` per power cube, paid out
+//!     smoothly across the cube's ~0.5s charge rather than as a single-tick
+//!     spike (see `power_cubes::advance_charging_cubes` and
+//!     `RewardState::credit_cube_charge`).
 //!
 //! Top-center HUD shows beacons-remaining and the running total.
 //!
@@ -43,6 +47,12 @@ pub const MINERAL_INTEGRAL_SCALE: f32 = 0.1;
 pub const BEACON_BUDGET: u32 = 5;
 /// Multiplier on the beacon's subsurface-weighted score.
 pub const BEACON_MULTIPLIER: f32 = 50.0;
+/// Flat bonus credited when a power cube finishes charging. Anchored to
+/// `DISTANCE_REWARD_PER_M`: in the `power_cubes` curriculum stage both
+/// `distance` and `cube` carry weight 1.0, so a detour to a cube tens of
+/// meters off-path costs 40-80+ forgone distance reward round-trip — the
+/// bonus needs to clearly exceed that for seeking cubes to be worth it.
+pub const CUBE_PICKUP_BONUS: f32 = 100.0;
 /// Per-element scarcity weight, in the same order `element_catalog()`
 /// yields. Water + Ti are clearly premium; He-3 the rarest.
 pub const SCARCITY_WEIGHTS: [f32; 6] = [
@@ -65,6 +75,7 @@ pub struct RewardState {
     pub distance: f32,
     pub mineral_integral: f32,
     pub beacon_bonus: f32,
+    pub cube_bonus: f32,
     pub beacons_remaining: u32,
     /// Chassis position from the previous frame; `None` on fresh start
     /// or just after a respawn so the next-frame delta isn't a teleport.
@@ -77,6 +88,7 @@ impl Default for RewardState {
             distance: 0.0,
             mineral_integral: 0.0,
             beacon_bonus: 0.0,
+            cube_bonus: 0.0,
             beacons_remaining: BEACON_BUDGET,
             last_chassis_pos: None,
         }
@@ -84,9 +96,26 @@ impl Default for RewardState {
 }
 
 impl RewardState {
-    /// Sum of all three components.
+    /// Sum of all four components.
     pub fn total(&self) -> f32 {
-        self.distance + self.mineral_integral + self.beacon_bonus
+        self.distance + self.mineral_integral + self.beacon_bonus + self.cube_bonus
+    }
+
+    /// Credit a slice of the cube-pickup bonus in proportion to how much
+    /// a cube charged this frame. Called every frame a cube is charging
+    /// with the clamped-progress delta, so the full `CUBE_PICKUP_BONUS`
+    /// is paid out smoothly across the ~0.5s charge rather than as a
+    /// single-tick +100 spike. That spike was ~100x the per-tick distance
+    /// signal and only landed on ~half of episodes, so it dominated the
+    /// return variance, wrecked GAE advantage / reward-normalization
+    /// estimates, and reliably triggered a PPO update blow-up (approx_kl
+    /// spike → explained_variance collapse) partway through training.
+    /// Summed over a full charge the deltas telescope to exactly
+    /// `CUBE_PICKUP_BONUS`, so per-episode totals are unchanged (a charge
+    /// still in progress at episode truncation is credited pro-rata,
+    /// which is fine — it's a fraction of one pickup at most).
+    pub fn credit_cube_charge(&mut self, progress_delta: f32) {
+        self.cube_bonus += CUBE_PICKUP_BONUS * progress_delta;
     }
 
     /// Credit the bonus for a beacon dropped at `(x, z)` and decrement
@@ -214,6 +243,7 @@ enum RewardCell {
     Distance,
     Mineral,
     BeaconBonus,
+    CubeBonus,
     Total,
 }
 
@@ -252,6 +282,7 @@ fn setup_reward_ui(mut commands: Commands, ui_font: Option<Res<UiFont>>) {
             reward_cell(bar, &ui_font, "DISTANCE", RewardCell::Distance, "0".into());
             reward_cell(bar, &ui_font, "MINERAL", RewardCell::Mineral, "0".into());
             reward_cell(bar, &ui_font, "BEACON", RewardCell::BeaconBonus, "0".into());
+            reward_cell(bar, &ui_font, "CUBE", RewardCell::CubeBonus, "0".into());
             reward_cell(bar, &ui_font, "TOTAL", RewardCell::Total, "0".into());
         });
 }
@@ -287,6 +318,7 @@ fn sync_reward_ui(reward: Res<RewardState>, mut q: Query<(&RewardCell, &mut Text
             RewardCell::Distance => format_total(reward.distance),
             RewardCell::Mineral => format_total(reward.mineral_integral),
             RewardCell::BeaconBonus => format_total(reward.beacon_bonus),
+            RewardCell::CubeBonus => format_total(reward.cube_bonus),
             RewardCell::Total => format_total(reward.total()),
         };
     }

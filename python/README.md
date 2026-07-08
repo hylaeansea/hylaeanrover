@@ -90,26 +90,147 @@ design. In short:
 ```bash
 # Stage 0 — locomotion (drive far, stay upright)
 python examples/evaluate.py --stage locomotion --random      # baseline
-python examples/train.py --stage locomotion --timesteps 1000000 --save runs/stage0
+python examples/train.py --stage locomotion --timesteps 1000000 \
+    --scenario terrain_mixed_1_2 --save runs/stage0
 python examples/evaluate.py --stage locomotion --load runs/stage0/model.zip \
     --vecnorm runs/stage0/vecnorm.pkl
 
-# Stage 1 — drive + minerals (warm-started from stage 0)
-python examples/train.py --stage minerals --timesteps 1000000 \
-    --load runs/stage0/model.zip --vecnorm runs/stage0/vecnorm.pkl --save runs/stage1
+# Stage 1A — cube intercept (one actionable forced cube, warm-started from stage 0)
+python examples/train.py --stage cube_intercept --timesteps 0 \
+    --load runs/stage0/model.zip --vecnorm runs/stage0/vecnorm.pkl \
+    --reset-reward-stats \
+    --scenario cube_intercept \
+    --teacher-pretrain-samples 20000 \
+    --teacher-pretrain-epochs 30 \
+    --teacher-scenarios cube_intercept \
+    --teacher-pretrain-only \
+    --save runs/stage1_cube_intercept_bc
 
-# Stage 2 — full mission incl. beacons (warm-started from stage 1)
+# Optional conservative PPO preservation pass after the BC-only checkpoint passes
+python examples/train.py --stage cube_intercept --timesteps 50000 \
+    --load runs/stage1_cube_intercept_bc/model.zip \
+    --vecnorm runs/stage1_cube_intercept_bc/vecnorm.pkl \
+    --preserve-reward-stats \
+    --scenario cube_intercept \
+    --train-scenarios cube_intercept,cube_intercept_low_power \
+    --extra-eval-scenarios cube_intercept_low_power,sparse_visible_low_power,no_cube_control \
+    --learning-rate 0.00001 --n-steps 512 --batch-size 128 \
+    --n-epochs 2 --clip-range 0.05 --target-kl 0.005 \
+    --save runs/stage1_cube_intercept
+
+# Stage 1B — power idle (low-power no-target discipline)
+python examples/train.py --stage power_idle --timesteps 0 \
+    --load runs/stage1_cube_intercept/model.zip \
+    --vecnorm runs/stage1_cube_intercept/vecnorm.pkl \
+    --reset-reward-stats \
+    --scenario power_idle \
+    --teacher-pretrain-samples 20000 \
+    --teacher-pretrain-epochs 10 \
+    --teacher-pretrain-batch-size 512 \
+    --teacher-scenarios power_idle,cube_intercept_low_power \
+    --teacher-pretrain-only \
+    --save runs/stage1_power_idle_bc
+
+# Stage 1C — power cubes (mixed dense/bridge/sparse, warm-started from power idle)
+python examples/train.py --stage power_cubes --timesteps 1000000 \
+    --load runs/stage1_power_idle_bc/model.zip \
+    --vecnorm runs/stage1_power_idle_bc/vecnorm.pkl \
+    --reset-reward-stats \
+    --n-envs 6 \
+    --scenario sparse_visible_low_power \
+    --train-scenarios dense_training,bridge_low_power,transition,sparse_visible_low_power,sparse_low_power,no_cube_control \
+    --extra-eval-scenarios sparse_visible_low_power,sparse_game,no_cube_control \
+    --cube-shaping intercept \
+    --save runs/stage1_power_cubes
+
+# Stage 2 — drive + minerals (warm-started from stage 1)
+python examples/train.py --stage minerals --timesteps 1000000 \
+    --load runs/stage1_power_cubes/model.zip \
+    --vecnorm runs/stage1_power_cubes/vecnorm.pkl \
+    --reset-reward-stats --save runs/stage2
+
+# Stage 3 — full mission incl. beacons (warm-started from stage 2)
 python examples/train.py --stage full --timesteps 1000000 \
-    --load runs/stage1/model.zip --vecnorm runs/stage1/vecnorm.pkl --save runs/stage2
+    --load runs/stage2/model.zip --vecnorm runs/stage2/vecnorm.pkl \
+    --reset-reward-stats --save runs/stage3
 
 tensorboard --logdir runs/
 ```
 
 `RoverEnv(..., beacons_enabled=False)` makes action index 9 an inert
-no-op (and disables the `beacons_deployed` game-over) — used by the
-locomotion/minerals stages so the action space stays `Discrete(10)`
-throughout. The reward shaping lives in
+no-op (and disables the `beacons_deployed` game-over) — used by every
+stage but `full` so the action space stays `Discrete(10)` throughout.
+Forced diagnostic/training cubes are spawned settled near terrain so the
+XZ cube sensor and 3D pickup rule agree. Airborne or otherwise
+non-actionable cubes are hidden from the RL-visible cube slots; debug
+`info` fields still report the nearest raw cube height/actionable state
+for diagnostics without changing `OBS_DIM`.
+
+The `cube_intercept` stage disables random cube spawns and trains on one
+visible, settled cube. The `power_idle` stage then trains low-power
+no-target behavior with no random cubes and no pickup reward, so the policy
+does not burn down a nearly empty battery when the actionable cube sensor
+is empty. The `power_cubes` stage then mixes dense, bridge, transition,
+sparse-visible, and sparse-game scenarios. In `power_cubes`, distance
+reward is off so visible-cube pickup and power behavior are hardened
+before travel reward returns in later stages. Dense spawns are
+training-only: the game keeps its own sparse, periodic spawn rate, and the
+exported autopilot bundle deliberately does not carry the training density
+over ("train dense, deploy sparse"). The reward shaping lives in
 `hylaeanrover.wrappers.StagedRewardWrapper`.
+
+Before moving from `power_cubes` to `minerals`, run the Stage 0/1 gates
+in [`../docs/rl_stage0_stage1_hardening_plan.md`](../docs/rl_stage0_stage1_hardening_plan.md).
+The key scenario knobs are:
+
+- `--scenario`: named eval/train presets such as `dense_training`,
+  `bridge_training`, `bridge_low_power`, `transition`,
+  `cube_intercept`, `cube_intercept_close`, `power_idle`,
+  `cube_intercept_low_power`, `sparse_game`, `sparse_low_power`,
+  `sparse_visible_reset`, `sparse_visible_low_power`, `low_power_start`,
+  `cube_visible_low_power`, and `no_cube_control`.
+- `--train-scenarios`: comma-separated scenario names assigned across
+  vectorized training workers for mixed-curriculum PPO runs. `--n-envs`
+  must be at least the number of listed scenarios.
+- `--horizon`: `short` (2000), `medium` (7200), or `long` (21600)
+  physics ticks.
+- `--terrain-height`: fixed value, `min:max` range, or preset such as
+  `mixed_1_2`.
+- `--cube-spawn-preset`: `dense_training`, `bridge_training`,
+  `transition`, `sparse_game`, or `none`.
+- `--power-start-fraction`: starts an episode with a partial battery for
+  low-power checks.
+- `--forced-cube-distance` and `--forced-cube-bearing-deg`: add one
+  reset-time cube in the cube sensor cone for sparse-visible diagnostics.
+- `--cube-shaping`: `low_power` rewards closing on visible cubes after
+  the battery is low; `intercept` also rewards range reduction and
+  heading commitment before low power. Use `off` for acceptance evals.
+- `--cube-approach-reward`, `--cube-heading-reward`, and
+  `--ignored-cube-penalty`: tune Stage 1 training-only cube approach
+  shaping.
+- `--loss-of-sight-penalty` and `--intercept-failure-penalty`: tune the
+  `cube_intercept` penalties for abandoning a visible cube or timing out
+  without pickup.
+- `--teacher-pretrain-samples`, `--teacher-pretrain-epochs`,
+  `--teacher-pretrain-batch-size`, and `--teacher-scenario`: optional
+  close-range teacher-assisted policy-head bootstrap for
+  `cube_intercept` and low-power idle bootstrap for `power_idle`. It is a
+  bootstrap only; promotion still depends on no-shaping eval gates and any
+  later PPO fine-tuning.
+- `--locomotion-shaping`: `power_efficiency` adds pacing shaping so
+  coasting/regen is learnable. `auto` enables it for `locomotion`,
+  `power_idle`, and `power_cubes`.
+- `--locomotion-coast-bonus`, `--locomotion-power-draw-penalty`,
+  `--locomotion-power-recovery-reward`, and
+  `--locomotion-out-of-power-penalty`: tune Stage 0 pacing pressure when
+  the policy plateaus as an out-of-power sprint.
+- `--low-power-no-target-throttle-penalty` and
+  `--low-power-no-target-coast-reward`: tune the extra `power_idle` /
+  `power_cubes` pressure for low-power steps where no actionable cube is
+  visible.
+- `--reset-reward-stats` / `--preserve-reward-stats`: reset reward
+  normalization for stage transitions, preserve it for same-stage
+  continuation.
 
 ### Speeding up training
 
@@ -154,6 +275,7 @@ overlays, camera — no Python in the loop):
 
 ```bash
 python examples/export_policy.py \
+    --stage locomotion \
     --model runs/stage0/model.zip --vecnorm runs/stage0/vecnorm.pkl
 cargo run -p hylaeanrover_game --release -- --policy runs/stage0/model.onnx
 ```
@@ -183,14 +305,20 @@ Then everything just points at the bundle:
 
 ```bash
 # resume / warm-start the next stage from the stage's best
-python examples/train.py --stage minerals --timesteps 1000000 \
+python examples/train.py --stage cube_intercept --timesteps 0 \
     --load models/locomotion/model.zip --vecnorm models/locomotion/vecnorm.pkl \
-    --save runs/minerals
+    --reset-reward-stats \
+    --scenario cube_intercept \
+    --teacher-pretrain-samples 20000 \
+    --teacher-pretrain-only \
+    --save runs/stage1_cube_intercept_bc
 # watch the best
 cargo run -p hylaeanrover_game --release -- --policy models/locomotion/model.onnx
 ```
 
 See [`../models/README.md`](../models/README.md) for the bundle layout.
+For a command-first walkthrough from no models through a promoted full
+policy, use [`TRAINING_GUIDE.md`](TRAINING_GUIDE.md).
 
 ## Action space
 

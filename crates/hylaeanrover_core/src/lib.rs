@@ -49,6 +49,21 @@ pub struct RoverCoreConfig {
     /// within a single episode and power management becomes part of
     /// the learned behavior.
     pub power_capacity_wh: f32,
+    /// Power-cube Poisson spawn rate (cubes/sec). The game and most RL
+    /// stages keep the default; the `power_cubes` curriculum stage raises
+    /// it so a short episode sees enough cubes to learn seek behavior.
+    pub cube_spawn_lambda: f32,
+    /// Half-width (m) of the square region power cubes spawn within. The
+    /// game and most RL stages keep the default; the `power_cubes` stage
+    /// shrinks it so denser cubes stay reachable within one episode.
+    pub cube_spawn_extent: f32,
+    /// Initial terrain height multiplier. The game keeps 1.0 by default;
+    /// RL eval/training can vary it per reset to prove locomotion is not
+    /// overfit to one terrain roughness.
+    pub terrain_height_scale: f32,
+    /// Seed for power-cube spawn randomness. The RL env reseeds this on
+    /// every reset so cube spawning is reproducible under the Gym seed.
+    pub cube_spawn_seed: u64,
 }
 
 impl Default for RoverCoreConfig {
@@ -58,6 +73,10 @@ impl Default for RoverCoreConfig {
             with_ui: true,
             beacons_enabled: true,
             power_capacity_wh: power_cubes::POWER_MAX,
+            cube_spawn_lambda: power_cubes::SPAWN_LAMBDA,
+            cube_spawn_extent: power_cubes::SPAWN_EXTENT,
+            terrain_height_scale: 1.0,
+            cube_spawn_seed: 42,
         }
     }
 }
@@ -69,6 +88,10 @@ impl RoverCoreConfig {
             with_ui: false,
             beacons_enabled: true,
             power_capacity_wh: power_cubes::POWER_MAX,
+            cube_spawn_lambda: power_cubes::SPAWN_LAMBDA,
+            cube_spawn_extent: power_cubes::SPAWN_EXTENT,
+            terrain_height_scale: 1.0,
+            cube_spawn_seed: 42,
         }
     }
 }
@@ -116,18 +139,23 @@ impl Plugin for RoverCorePlugin {
 
         // Game logic — all of these are headless-safe (UI is gated on
         // UiFont presence inside each plugin).
-        app.add_plugins(terrain_controls::TerrainControlsPlugin)
-            .add_plugins(power_cubes::PowerCubesPlugin {
-                capacity_wh: self.0.power_capacity_wh,
-            })
-            .add_plugins(beacons::BeaconsPlugin)
-            .add_plugins(minerals::MineralsPlugin)
-            .add_plugins(imu::ImuPlugin)
-            .add_plugins(reward::RewardPlugin)
-            .add_plugins(game_state::GameStatePlugin)
-            .add_plugins(telemetry::TelemetryPlugin)
-            .add_plugins(RoverPlugin {
-                spawn_mode: self.0.spawn_mode,
-            });
+        app.add_plugins(terrain_controls::TerrainControlsPlugin {
+            initial_height_scale: self.0.terrain_height_scale,
+        })
+        .add_plugins(power_cubes::PowerCubesPlugin {
+            capacity_wh: self.0.power_capacity_wh,
+            spawn_lambda: self.0.cube_spawn_lambda,
+            spawn_extent: self.0.cube_spawn_extent,
+            rng_seed: self.0.cube_spawn_seed,
+        })
+        .add_plugins(beacons::BeaconsPlugin)
+        .add_plugins(minerals::MineralsPlugin)
+        .add_plugins(imu::ImuPlugin)
+        .add_plugins(reward::RewardPlugin)
+        .add_plugins(game_state::GameStatePlugin)
+        .add_plugins(telemetry::TelemetryPlugin)
+        .add_plugins(RoverPlugin {
+            spawn_mode: self.0.spawn_mode,
+        });
     }
 }

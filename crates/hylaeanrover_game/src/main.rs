@@ -19,12 +19,19 @@ use bevy_rapier3d::prelude::*;
 
 use hylaeanrover_core::terrain_controls::{TerrainPanel, cursor_over_terrain_panel};
 use hylaeanrover_core::ui::UiFont;
-use hylaeanrover_core::{ChassisEntity, RoverCorePlugin};
+use hylaeanrover_core::{ChassisEntity, RoverCoreConfig, RoverCorePlugin};
 
 mod autopilot;
 use autopilot::AutopilotPlugin;
 
 fn main() {
+    // If `--policy` points at an exported checkpoint whose sidecar
+    // `.norm.json` carries the training-time env config, replay it under
+    // those conditions instead of the game's own defaults — see
+    // `autopilot::resolve_core_config`. Must happen before
+    // `RoverCorePlugin` is constructed below, so it's plain pre-App code.
+    let core_cfg = autopilot::resolve_core_config(RoverCoreConfig::default());
+
     App::new()
         .add_plugins(DefaultPlugins)
         .add_plugins(PanOrbitCameraPlugin)
@@ -33,7 +40,7 @@ fn main() {
         // FPS / frame-time diagnostics so the on-screen counter has data.
         .add_plugins(FrameTimeDiagnosticsPlugin::default())
         // Everything game-logic-related lives in the core crate.
-        .add_plugins(RoverCorePlugin::default())
+        .add_plugins(RoverCorePlugin(core_cfg))
         // Optional ONNX-policy autopilot (no-op unless `--policy` given).
         .add_plugins(AutopilotPlugin)
         .init_resource::<CameraMode>()

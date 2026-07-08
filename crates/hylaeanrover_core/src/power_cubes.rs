@@ -17,21 +17,49 @@ use bevy::ui::RelativeCursorPosition;
 use bevy_rapier3d::prelude::*;
 
 use crate::game_state::{GameState, GameStatus};
+use crate::reward::RewardState;
 use crate::ui::{LeftSidebar, LeftSidebarSet, UiFont};
-use rand::Rng;
+use rand::{Rng, SeedableRng, rngs::StdRng};
 
 use crate::ChassisEntity;
 use crate::terrain_controls::TerrainState;
 
 // ---- Tunable constants ----------------------------------------------------
-const SPAWN_LAMBDA: f32 = 0.05;
+/// Default Poisson spawn rate (cubes/sec). Overridable per stage via
+/// `PowerCubesPlugin::spawn_lambda` / `RoverCoreConfig::cube_spawn_lambda`.
+pub const SPAWN_LAMBDA: f32 = 0.05;
 const CUBE_HALF_EXTENT: f32 = 0.35;
 const SPAWN_HEIGHT: f32 = 40.0;
 /// Maximum |x| / |z| (meters) at which a cube may spawn. Decoupled from
 /// terrain size: the arena is now ~5 km, but a cube 2 km away is
 /// effectively unreachable on one battery, so we hold spawns inside
-/// reasonable round-trip range of the origin.
-const SPAWN_EXTENT: f32 = 500.0;
+/// reasonable round-trip range of the origin. Overridable per stage via
+/// `PowerCubesPlugin::spawn_extent` / `RoverCoreConfig::cube_spawn_extent`.
+pub const SPAWN_EXTENT: f32 = 500.0;
+/// Minimum distance (m) from the rover's current position a cube may
+/// spawn — see the annulus-sampling comment in `spawn_power_cubes`. Not
+/// per-stage configurable (unlike `SPAWN_LAMBDA`/`SPAWN_EXTENT`): it
+/// exists to guarantee every cube requires real navigation to reach,
+/// regardless of how dense or close a given stage's spawn config is.
+const MIN_SPAWN_DISTANCE: f32 = 10.0;
+/// Hard cap on concurrently-alive (uncollected) cubes. RL training relies
+/// on the per-episode `RelaunchEvent` to wipe every cube out
+/// (`despawn_cubes_on_relaunch`), so a spawn rate tuned for a bounded
+/// ~30s episode is safe there regardless of how dense it is. The game has
+/// no such boundary — a continuous autopilot/manual session just keeps
+/// accumulating cubes forever at whatever rate is configured, since
+/// despawn only happens on pickup or relaunch, neither of which scales
+/// with elapsed time. This cap is what keeps *any* configured rate safe
+/// for indefinite play instead of relying on the base rate happening to
+/// be slow enough.
+///
+/// Set comfortably above the worst-case total spawn count *within one RL
+/// episode* at the densest configured training rate (`power_cubes`'s
+/// λ=1.5/s × ~33s episode ≈ 50 if literally none were ever picked up),
+/// so this backstop doesn't quietly interfere with training dynamics by
+/// suppressing spawns mid-episode. At the base game rate (0.05/sec) it
+/// would take ~50 minutes of continuous zero-pickup play to ever bind.
+const MAX_ALIVE_CUBES: usize = 150;
 
 /// Total reserve at startup (Watt-hours). 1 kWh. The game uses this
 /// default; the RL env can shrink it (`PowerCubesPlugin::capacity_wh`)
@@ -46,7 +74,10 @@ const REGEN_EFFICIENCY: f32 = 0.2;
 /// How much energy each cube grants (Wh).
 const CUBE_VALUE: f32 = 100.0;
 /// Distance (m) from chassis at which a cube starts being absorbed.
-const PICKUP_RANGE: f32 = 2.0;
+/// The sensor reports XZ range while pickup uses full 3D distance from
+/// the chassis center, so this needs enough vertical tolerance for a
+/// rover that drives next to a settled ground cube to actually collect it.
+const PICKUP_RANGE: f32 = 3.0;
 /// Seconds for a cube to fully charge (glow ramp duration).
 const CHARGE_TIME: f32 = 0.5;
 /// Multiplier on the base emissive value at the peak of the glow ramp.
@@ -147,11 +178,71 @@ struct PowerCubeAssets {
 #[derive(Resource)]
 struct PoissonSpawner {
     time_to_next: f32,
+    /// Poisson arrival rate (cubes/sec), overridable per stage — see
+    /// `PowerCubesPlugin::spawn_lambda`.
+    lambda: f32,
 }
 
-impl Default for PoissonSpawner {
-    fn default() -> Self {
-        Self { time_to_next: 1.0 }
+impl PoissonSpawner {
+    fn with_lambda(lambda: f32) -> Self {
+        Self {
+            time_to_next: 1.0,
+            lambda,
+        }
+    }
+}
+
+#[derive(Resource)]
+pub struct PowerCubeRng {
+    seed: u64,
+    rng: StdRng,
+}
+
+impl PowerCubeRng {
+    pub fn from_seed(seed: u64) -> Self {
+        Self {
+            seed,
+            rng: StdRng::seed_from_u64(seed),
+        }
+    }
+
+    pub fn reseed(&mut self, seed: u64) {
+        self.seed = seed;
+        self.rng = StdRng::seed_from_u64(seed);
+    }
+
+    pub fn seed(&self) -> u64 {
+        self.seed
+    }
+}
+
+/// Half-width (m) of the square region cubes may spawn within, overridable
+/// per stage — see `PowerCubesPlugin::spawn_extent`.
+#[derive(Resource)]
+struct CubeSpawnExtent(f32);
+
+/// One-shot cube placement request used by RL diagnostics/curriculum.
+///
+/// Normal gameplay and sparse eval still use the Poisson spawner. This
+/// resource lets the Python env add exactly one reachable cube at reset so
+/// Stage 1 can be tested on "cube is visible, go intercept it" without
+/// waiting for a rare sparse spawn.
+#[derive(Resource, Clone, Copy, Default)]
+pub struct ForcedPowerCubeSpawn {
+    pub pending: bool,
+    pub distance_m: f32,
+    pub bearing_deg: f32,
+}
+
+impl ForcedPowerCubeSpawn {
+    pub fn request(&mut self, distance_m: f32, bearing_deg: f32) {
+        self.pending = true;
+        self.distance_m = distance_m;
+        self.bearing_deg = bearing_deg;
+    }
+
+    pub fn clear(&mut self) {
+        self.pending = false;
     }
 }
 
@@ -166,6 +257,8 @@ pub struct PowerState {
     /// tutorial banner to dismiss itself after the player has clearly
     /// figured the mechanic out.
     pub pickups_count: u32,
+    /// Cubes absorbed since the last relaunch/reset.
+    pub episode_pickups_count: u32,
 }
 
 impl Default for PowerState {
@@ -182,12 +275,19 @@ impl PowerState {
             max: capacity_wh,
             last_chassis_pos: None,
             pickups_count: 0,
+            episode_pickups_count: 0,
         }
     }
 
     /// Whether the rover has any energy to spend.
     pub fn has_power(&self) -> bool {
         self.current > 0.0
+    }
+
+    /// Set the current reserve to a fraction of capacity.
+    pub fn set_fraction(&mut self, fraction: f32) {
+        self.current = self.max * fraction.clamp(0.0, 1.0);
+        self.last_chassis_pos = None;
     }
 }
 
@@ -207,12 +307,25 @@ pub struct PowerCubesPlugin {
     /// `POWER_MAX` default; the RL env passes a smaller value so power
     /// management binds within a single episode.
     pub capacity_wh: f32,
+    /// Poisson spawn rate (cubes/sec). The game and most RL stages keep
+    /// `SPAWN_LAMBDA`; the `power_cubes` curriculum stage raises it so a
+    /// ~33s episode sees enough cubes to learn seek behavior from.
+    pub spawn_lambda: f32,
+    /// Half-width (m) of the square spawn region. The game and most RL
+    /// stages keep `SPAWN_EXTENT`; the `power_cubes` stage shrinks it so
+    /// denser cubes are also reachable within one episode.
+    pub spawn_extent: f32,
+    /// Seed for deterministic cube spawn timing/placement.
+    pub rng_seed: u64,
 }
 
 impl Default for PowerCubesPlugin {
     fn default() -> Self {
         Self {
             capacity_wh: POWER_MAX,
+            spawn_lambda: SPAWN_LAMBDA,
+            spawn_extent: SPAWN_EXTENT,
+            rng_seed: 42,
         }
     }
 }
@@ -220,7 +333,10 @@ impl Default for PowerCubesPlugin {
 impl Plugin for PowerCubesPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<PowerCubeAssets>()
-            .init_resource::<PoissonSpawner>()
+            .init_resource::<ForcedPowerCubeSpawn>()
+            .insert_resource(PoissonSpawner::with_lambda(self.spawn_lambda))
+            .insert_resource(CubeSpawnExtent(self.spawn_extent))
+            .insert_resource(PowerCubeRng::from_seed(self.rng_seed))
             .insert_resource(PowerState::with_capacity(self.capacity_wh))
             .add_message::<RelaunchEvent>()
             .add_systems(
@@ -238,8 +354,10 @@ impl Plugin for PowerCubesPlugin {
             .add_systems(
                 Update,
                 (
+                    spawn_forced_power_cube,
                     spawn_power_cubes,
                     despawn_cubes_on_relaunch,
+                    reset_spawner_on_relaunch,
                     reset_power_on_relaunch,
                     consume_power_from_motion,
                     detect_cube_pickup,
@@ -343,18 +461,36 @@ fn spawn_power_cubes(
     mut commands: Commands,
     time: Res<Time>,
     mut spawner: ResMut<PoissonSpawner>,
+    mut cube_rng: ResMut<PowerCubeRng>,
+    extent: Res<CubeSpawnExtent>,
     assets: Res<PowerCubeAssets>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     terrain: Option<Res<TerrainState>>,
+    chassis_res: Res<ChassisEntity>,
+    chassis_q: Query<&GlobalTransform>,
+    existing_cubes: Query<Entity, With<PowerCube>>,
 ) {
+    if spawner.lambda <= 0.0 {
+        return;
+    }
     spawner.time_to_next -= time.delta_secs();
     if spawner.time_to_next > 0.0 {
         return;
     }
 
-    let mut rng = rand::thread_rng();
+    // Always redraw the next-arrival time even if this particular arrival
+    // ends up skipped below (at the cap) — otherwise a capped-out world
+    // would retry every single frame instead of waiting out a normal
+    // Poisson interval.
+    let rng = &mut cube_rng.rng;
     let u: f32 = rng.gen_range(f32::EPSILON..1.0_f32);
-    spawner.time_to_next = -u.ln() / SPAWN_LAMBDA;
+    spawner.time_to_next = -u.ln() / spawner.lambda;
+
+    // See MAX_ALIVE_CUBES: bounds uncollected pileup over an unbounded
+    // session regardless of how dense the configured spawn rate is.
+    if existing_cubes.iter().count() >= MAX_ALIVE_CUBES {
+        return;
+    }
 
     // Need the terrain to exist so we know the heightfield is ready and
     // so we can spawn cubes a small fixed height *above the local
@@ -363,10 +499,115 @@ fn spawn_power_cubes(
     let Some(terrain) = terrain.as_ref() else {
         return;
     };
-    let x: f32 = rng.gen_range(-SPAWN_EXTENT..SPAWN_EXTENT);
-    let z: f32 = rng.gen_range(-SPAWN_EXTENT..SPAWN_EXTENT);
+    // Anchor the spawn region on the rover's *current* position rather
+    // than the world origin. A fixed origin-anchored box only makes
+    // sense while the rover is still near where it started — once it's
+    // driven away (which a competent policy does quickly), an
+    // origin-anchored box stops overlapping its path at all, no matter
+    // how the rate/extent knobs are tuned. Falls back to the origin
+    // before the rover has spawned.
+    let anchor = chassis_res
+        .0
+        .and_then(|id| chassis_q.get(id).ok())
+        .map(|gxf| gxf.translation())
+        .unwrap_or(Vec3::ZERO);
+    // Sample in an annulus [MIN_SPAWN_DISTANCE, extent) around the anchor,
+    // not a box centered on it — a plain box lets a meaningful fraction of
+    // draws land within a few meters of the rover, so a policy that just
+    // sits still (or barely moves) can have cubes spawn close enough to
+    // reach with little or no real navigation. Forcing a minimum distance
+    // means every cube requires actually driving toward it.
+    let extent = extent.0.max(MIN_SPAWN_DISTANCE + 1.0);
+    let angle = rng.gen_range(0.0..std::f32::consts::TAU);
+    let radius = rng.gen_range(MIN_SPAWN_DISTANCE..extent);
+    let x = anchor.x + radius * angle.cos();
+    let z = anchor.z + radius * angle.sin();
     let local_y = terrain.height_at(x, z);
 
+    spawn_power_cube_at(&mut commands, &assets, &mut materials, rng, x, local_y, z);
+}
+
+fn spawn_forced_power_cube(
+    mut commands: Commands,
+    mut forced: ResMut<ForcedPowerCubeSpawn>,
+    mut cube_rng: ResMut<PowerCubeRng>,
+    assets: Res<PowerCubeAssets>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    terrain: Option<Res<TerrainState>>,
+    chassis_res: Res<ChassisEntity>,
+    chassis_q: Query<&GlobalTransform>,
+    existing_cubes: Query<Entity, With<PowerCube>>,
+) {
+    if !forced.pending || existing_cubes.iter().count() >= MAX_ALIVE_CUBES {
+        return;
+    }
+    let Some(terrain) = terrain.as_ref() else {
+        return;
+    };
+    let Some(chassis_id) = chassis_res.0 else {
+        return;
+    };
+    let Ok(chassis_gxf) = chassis_q.get(chassis_id) else {
+        return;
+    };
+
+    let fwd3 = chassis_gxf.rotation() * Vec3::NEG_X;
+    let fwd = Vec2::new(fwd3.x, fwd3.z);
+    if fwd.length_squared() < 1e-6 {
+        return;
+    }
+    let fwd = fwd.normalize();
+    let bearing_rad = forced.bearing_deg.to_radians();
+    let dir = fwd * bearing_rad.cos() + Vec2::new(-fwd.y, fwd.x) * bearing_rad.sin();
+    let anchor = chassis_gxf.translation();
+    let x = anchor.x + forced.distance_m * dir.x;
+    let z = anchor.z + forced.distance_m * dir.y;
+    let local_y = terrain.height_at(x, z);
+
+    spawn_power_cube_at_height(
+        &mut commands,
+        &assets,
+        &mut materials,
+        &mut cube_rng.rng,
+        x,
+        local_y,
+        z,
+        CUBE_HALF_EXTENT + 0.05,
+    );
+    forced.pending = false;
+}
+
+fn spawn_power_cube_at(
+    commands: &mut Commands,
+    assets: &PowerCubeAssets,
+    materials: &mut Assets<StandardMaterial>,
+    rng: &mut StdRng,
+    x: f32,
+    local_y: f32,
+    z: f32,
+) {
+    spawn_power_cube_at_height(
+        commands,
+        assets,
+        materials,
+        rng,
+        x,
+        local_y,
+        z,
+        SPAWN_HEIGHT,
+    );
+}
+
+fn spawn_power_cube_at_height(
+    commands: &mut Commands,
+    assets: &PowerCubeAssets,
+    materials: &mut Assets<StandardMaterial>,
+    rng: &mut StdRng,
+    x: f32,
+    local_y: f32,
+    z: f32,
+    spawn_height: f32,
+) {
     let spin = Vec3::new(
         rng.gen_range(-1.0..1.0),
         rng.gen_range(-1.0..1.0),
@@ -389,7 +630,7 @@ fn spawn_power_cubes(
     commands.spawn((
         Mesh3d(assets.mesh.clone()),
         MeshMaterial3d(material),
-        Transform::from_xyz(x, local_y + SPAWN_HEIGHT, z),
+        Transform::from_xyz(x, local_y + spawn_height, z),
         RigidBody::Dynamic,
         Collider::cuboid(CUBE_HALF_EXTENT, CUBE_HALF_EXTENT, CUBE_HALF_EXTENT),
         Friction::coefficient(0.5),
@@ -485,6 +726,16 @@ fn despawn_cubes_on_relaunch(
     }
 }
 
+fn reset_spawner_on_relaunch(
+    mut events: MessageReader<RelaunchEvent>,
+    mut spawner: ResMut<PoissonSpawner>,
+) {
+    if events.read().count() == 0 {
+        return;
+    }
+    spawner.time_to_next = 1.0;
+}
+
 /// Refill the battery on `RelaunchEvent`, mirroring the reward /
 /// game-state / rover resets. This must live here (not in the UI
 /// button handler) because the RL env's `reset()` fires the event
@@ -505,6 +756,7 @@ fn reset_power_on_relaunch(
     }
     power.current = power.max;
     power.last_chassis_pos = None;
+    power.episode_pickups_count = 0;
 }
 
 /// Breathe idle cubes' emissive up and down so they catch the eye even
@@ -576,10 +828,18 @@ fn advance_charging_cubes(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut cubes: Query<(Entity, &mut Charging, &MeshMaterial3d<StandardMaterial>)>,
     mut power: ResMut<PowerState>,
+    mut reward: ResMut<RewardState>,
 ) {
     for (entity, mut charging, mat_handle) in cubes.iter_mut() {
+        let prev_t = charging.progress.clamp(0.0, 1.0);
         charging.progress += time.delta_secs() / CHARGE_TIME;
         let t = charging.progress.clamp(0.0, 1.0);
+
+        // Pay out the pickup bonus in proportion to the progress made this
+        // frame, so the full CUBE_PICKUP_BONUS is spread across the charge
+        // instead of spiking on the completion tick (see
+        // RewardState::credit_cube_charge).
+        reward.credit_cube_charge(t - prev_t);
 
         if let Some(mat) = materials.get_mut(&mat_handle.0) {
             let boost = 1.0 + t * (PEAK_EMISSIVE_MULT - 1.0);
@@ -595,6 +855,7 @@ fn advance_charging_cubes(
         if charging.progress >= 1.0 {
             power.current = (power.current + CUBE_VALUE).min(power.max);
             power.pickups_count = power.pickups_count.saturating_add(1);
+            power.episode_pickups_count = power.episode_pickups_count.saturating_add(1);
             commands.entity(entity).despawn();
         }
     }
@@ -987,5 +1248,35 @@ fn handle_relaunch_button(
         if *interaction == Interaction::Pressed {
             writer.write(RelaunchEvent);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn power_fraction_is_clamped_and_clears_last_position() {
+        let mut power = PowerState::with_capacity(100.0);
+        power.last_chassis_pos = Some(Vec3::new(1.0, 2.0, 3.0));
+        power.set_fraction(0.25);
+        assert_eq!(power.current, 25.0);
+        assert!(power.last_chassis_pos.is_none());
+
+        power.set_fraction(2.0);
+        assert_eq!(power.current, 100.0);
+
+        power.set_fraction(-1.0);
+        assert_eq!(power.current, 0.0);
+    }
+
+    #[test]
+    fn cube_rng_reseed_replays_sequence() {
+        let mut rng = PowerCubeRng::from_seed(7);
+        let a: f32 = rng.rng.gen_range(0.0..1.0);
+        rng.reseed(7);
+        let b: f32 = rng.rng.gen_range(0.0..1.0);
+        assert_eq!(a, b);
+        assert_eq!(rng.seed(), 7);
     }
 }

@@ -31,7 +31,7 @@ use hylaeanrover_core::observation::{OBS_DIM, build_observation};
 use hylaeanrover_core::power_cubes::PowerState;
 use hylaeanrover_core::reward::RewardState;
 use hylaeanrover_core::telemetry::RoverTelemetry;
-use hylaeanrover_core::{AutopilotActive, ChassisEntity, RoverAction};
+use hylaeanrover_core::{AutopilotActive, ChassisEntity, RoverAction, RoverCoreConfig};
 
 /// A runnable, optimized ONNX graph mapping a `[1, OBS_DIM]` observation
 /// to `[1, 10]` action logits.
@@ -124,6 +124,78 @@ fn parse_policy_arg() -> Option<PathBuf> {
 /// `model.norm.json`).
 fn norm_path_for(onnx_path: &Path) -> PathBuf {
     onnx_path.with_extension("norm.json")
+}
+
+/// If `--policy <path>` is present and its sidecar `.norm.json` carries
+/// the training-time `beacons_enabled` / `power_capacity_wh` (see
+/// `export.py`), apply them on top of `default` so the game replays the
+/// checkpoint under the same conditions it trained in. Must run *before*
+/// `RoverCorePlugin` is constructed (that's where these fields get baked
+/// in), so this is plain pre-Bevy-App code, not a system — called from
+/// `main()`.
+///
+/// Deliberately does *not* carry over `cube_spawn_lambda` /
+/// `cube_spawn_extent`, even though `export.py` used to also write them:
+/// those calibrate a Poisson spawn *rate* for a bounded ~33s training
+/// episode that gets fully wiped on every `RelaunchEvent`. The game has
+/// no such episode boundary — the autopilot just keeps driving
+/// indefinitely — so applying a training-dense rate to an unbounded
+/// session piles up cubes without limit the
+/// longer you watch, instead of settling at a steady state. Battery size
+/// and the beacon toggle don't have that failure mode (fixed capacity /
+/// a simple boolean), so they're safe to carry over; a spawn *rate*
+/// isn't. `spawn_power_cubes`'s `MAX_ALIVE_CUBES` cap is the belt-and-
+/// suspenders backstop for this regardless of what rate is configured.
+///
+/// Falls back to `default` untouched if there's no `--policy`, no
+/// sidecar file, or a sidecar missing these keys (both optional, same
+/// convention `load_norm` already uses for `frame_skip`) — so existing
+/// exported bundles keep working exactly as before.
+pub(crate) fn resolve_core_config(default: RoverCoreConfig) -> RoverCoreConfig {
+    let Some(onnx_path) = parse_policy_arg() else {
+        return default;
+    };
+    let norm_path = norm_path_for(&onnx_path);
+    let Ok(text) = std::fs::read_to_string(&norm_path) else {
+        return default;
+    };
+    let cfg = apply_norm_overrides(default, &text);
+
+    // Runs before DefaultPlugins (and its LogPlugin) is added, so `info!`
+    // isn't guaranteed to go anywhere yet — plain eprintln instead.
+    if cfg.beacons_enabled != default.beacons_enabled
+        || cfg.power_capacity_wh != default.power_capacity_wh
+    {
+        eprintln!(
+            "Autopilot: matching training config from {} (beacons_enabled={}, power_capacity_wh={})",
+            norm_path.display(),
+            cfg.beacons_enabled,
+            cfg.power_capacity_wh
+        );
+    }
+    cfg
+}
+
+/// Parse `norm_json` and apply whichever of `beacons_enabled` /
+/// `power_capacity_wh` it contains on top of `default` (see
+/// `resolve_core_config` for why `cube_spawn_lambda`/`cube_spawn_extent`
+/// are deliberately *not* read here even if an older or newer sidecar
+/// happens to contain them). Split out from `resolve_core_config` so the
+/// override logic is testable without faking `--policy` / real files on
+/// disk (see the unit tests below). Malformed JSON or a missing key
+/// simply leaves the corresponding field(s) at `default`.
+fn apply_norm_overrides(default: RoverCoreConfig, norm_json: &str) -> RoverCoreConfig {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(norm_json) else {
+        return default;
+    };
+    let mut cfg = default;
+    if let Some(b) = v["beacons_enabled"].as_bool() {
+        cfg.beacons_enabled = b;
+    }
+    if let Some(wh) = v["power_capacity_wh"].as_f64() {
+        cfg.power_capacity_wh = wh as f32;
+    }
+    cfg
 }
 
 fn load_runtime(onnx_path: &Path) -> TractResult<AutopilotRuntime> {
@@ -284,4 +356,68 @@ fn infer(policy: &Policy, normalized: &[f32]) -> TractResult<usize> {
         .map(|(i, _)| i)
         .unwrap_or(4); // 4 = stop, a safe default
     Ok(index)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // A stage trained with beacons disabled and a small battery (e.g.
+    // power_cubes) should override both fields on top of the game's
+    // defaults — this is the exact scenario that let a policy silently
+    // drop live beacons in the game (see git history). `cube_spawn_*`
+    // must stay at the game's default even though this (older-format)
+    // sidecar contains them — carrying over a training-dense spawn rate
+    // into the game's unbounded session is what caused cubes to pile up
+    // without limit (see git history, again).
+    #[test]
+    fn applies_beacons_and_power_but_not_cube_spawn() {
+        let default = RoverCoreConfig::default();
+        let norm_json = r#"{
+            "beacons_enabled": false,
+            "power_capacity_wh": 100.0,
+            "cube_spawn_lambda": 3.5,
+            "cube_spawn_extent": 25.0
+        }"#;
+        let cfg = apply_norm_overrides(default, norm_json);
+        assert!(!cfg.beacons_enabled);
+        assert_eq!(cfg.power_capacity_wh, 100.0);
+        assert_eq!(cfg.cube_spawn_lambda, default.cube_spawn_lambda);
+        assert_eq!(cfg.cube_spawn_extent, default.cube_spawn_extent);
+    }
+
+    // Old-format sidecars (exported before this fix) lack these keys
+    // entirely — must not regress existing bundles like `models/locomotion`.
+    #[test]
+    fn missing_keys_fall_back_to_default() {
+        let default = RoverCoreConfig::default();
+        let norm_json = r#"{"mean": [], "var": [], "frame_skip": 4}"#;
+        let cfg = apply_norm_overrides(default, norm_json);
+        assert_eq!(cfg.beacons_enabled, default.beacons_enabled);
+        assert_eq!(cfg.power_capacity_wh, default.power_capacity_wh);
+    }
+
+    // Malformed JSON must not panic — just fall back entirely.
+    #[test]
+    fn malformed_json_falls_back_to_default() {
+        let default = RoverCoreConfig::default();
+        let cfg = apply_norm_overrides(default, "not json");
+        assert_eq!(cfg.beacons_enabled, default.beacons_enabled);
+        assert_eq!(cfg.power_capacity_wh, default.power_capacity_wh);
+    }
+
+    // `full`-stage exports have beacons_enabled=true, matching the game's
+    // own default — should be a no-op (other than the harmless re-set).
+    #[test]
+    fn full_stage_matches_game_defaults() {
+        let default = RoverCoreConfig::default();
+        let norm_json = r#"{
+            "beacons_enabled": true,
+            "power_capacity_wh": 100.0,
+            "cube_spawn_lambda": 3.5,
+            "cube_spawn_extent": 25.0
+        }"#;
+        let cfg = apply_norm_overrides(default, norm_json);
+        assert_eq!(cfg.beacons_enabled, default.beacons_enabled);
+    }
 }

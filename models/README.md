@@ -15,7 +15,7 @@ models/<stage>/
 └── model.norm.json  obs stats + frame-skip for the autopilot
 ```
 
-`<stage>` is one of `locomotion`, `minerals`, `full`.
+`<stage>` is one of `locomotion`, `power_cubes`, `minerals`, `full`.
 
 ## Promoting a run into here
 
@@ -32,16 +32,26 @@ git add ../models/locomotion && git commit -m "Promote locomotion model"
 `promote_model.py` copies the chosen `model.zip` + `vecnorm.pkl` here and
 regenerates `model.onnx` + `model.norm.json` from them.
 
+Do not promote `models/power_cubes/` until the Stage 1 gates in
+[`../docs/rl_stage0_stage1_hardening_plan.md`](../docs/rl_stage0_stage1_hardening_plan.md)
+pass. That means the policy must beat the promoted locomotion policy on
+pickup rate, end power, out-of-power rate, sparse-game behavior, and
+low-power visible-cube approach metrics.
+
 ## Using a promoted model
 
 Resume training from the stage's best (e.g. continue locomotion, or warm-
 start the next stage):
 
 ```bash
-python examples/train.py --stage minerals --timesteps 1000000 \
+python examples/train.py --stage power_cubes --timesteps 1000000 \
     --load models/locomotion/model.zip --vecnorm models/locomotion/vecnorm.pkl \
-    --save runs/minerals
+    --reset-reward-stats \
+    --save runs/power_cubes
 ```
+
+Use `--preserve-reward-stats` instead when continuing the same stage from
+one of its own checkpoints.
 
 Evaluate it:
 

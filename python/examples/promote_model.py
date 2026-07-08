@@ -57,12 +57,23 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--stage", choices=STAGES, required=True)
     p.add_argument("--run", required=True, help="training run dir, e.g. runs/stage0")
-    p.add_argument("--source", choices=("best", "final"), default="best",
-                   help="which checkpoint to promote (default: eval-best)")
-    p.add_argument("--frame-skip", type=int, default=1,
-                   help="frame-skip the run was trained with (recorded for the autopilot)")
-    p.add_argument("--models-dir", default=str(REPO_ROOT / "models"),
-                   help="tracked models directory (default: <repo>/models)")
+    p.add_argument(
+        "--source",
+        choices=("best", "final"),
+        default="best",
+        help="which checkpoint to promote (default: eval-best)",
+    )
+    p.add_argument(
+        "--frame-skip",
+        type=int,
+        default=1,
+        help="frame-skip the run was trained with (recorded for the autopilot)",
+    )
+    p.add_argument(
+        "--models-dir",
+        default=str(REPO_ROOT / "models"),
+        help="tracked models directory (default: <repo>/models)",
+    )
     args = p.parse_args()
 
     src_model, src_vecnorm = _source_pair(Path(args.run), args.source)
@@ -77,8 +88,11 @@ def main() -> None:
     print(f"Copied {src_vecnorm} -> {dest_vecnorm}")
 
     onnx, norm = export_policy(
-        dest_model, dest_vecnorm, dest_dir / "model.onnx",
-        stage=args.stage, frame_skip=args.frame_skip,
+        dest_model,
+        dest_vecnorm,
+        dest_dir / "model.onnx",
+        stage=args.stage,
+        frame_skip=args.frame_skip,
     )
     print(f"Exported {onnx}")
     print(f"Exported {norm}")
