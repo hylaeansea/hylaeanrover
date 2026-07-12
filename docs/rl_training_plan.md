@@ -514,3 +514,19 @@ mid-training via the O key.
     supervisor-owned and byte-identical between models.
   - Promoted `runs/stage2_minerals_coverage/best` with
     `--coverage-observation`; sidecar exports `coverage_version: 1`.
+- 2026-07-12 — Full-stage promotion of the coverage policy (no Stage 3 PPO):
+  - Re-baselined the full stage at seed 2000 (100 episodes, medium,
+    frame-skip 4): the July hierarchical table is stale post framework
+    reset (old full bundle now measures 6537/3696 minerals and 0.85/0.18
+    pickups on transition/sparse, vs the recorded 7468/4884, 4.15/0.37).
+  - Coverage policy + hierarchical beacon controller beats the old full
+    bundle on the same seeds: minerals +10%/+12%, unique cells +63%/+25%,
+    pickups and beacon usage up, flips <=2%, 0% out-of-power. Known
+    trade: transition beacon bonus -17% (beacons deployed on fresher,
+    lower-scoring ground); address via the supervisor surface-score
+    threshold, not PPO fine-tuning.
+  - Promoted the coverage best checkpoint as `models/full/` with
+    `coverage_version: 1` in the sidecar; staged under
+    `runs/stage3_full_coverage_hierarchical/`. The full bundle and the
+    minerals bundle now share the same policy weights by design — the
+    full stage adds only the supervisor's beacon logic.

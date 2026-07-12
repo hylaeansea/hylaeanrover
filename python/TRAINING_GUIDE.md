@@ -923,17 +923,28 @@ surface score is at least 150. This same logic runs in the game.
 
 The July 2026 direct PPO probe was rejected: it learned beacon reward but cut
 sparse mineral reward by more than half. The frozen Stage 2 policy plus the
-hierarchical controller passed instead:
+hierarchical controller is the accepted architecture. The 2026-07-12
+re-baseline (same matched 100-episode, medium-horizon protocol at seed 2000
+and frame skip 4, run after the framework reset and coverage_v1 landed)
+compared the previous full bundle against the promoted coverage policy under
+the beacon controller:
 
-| Scenario | Minerals | Pickups | Beacons | Flip | Out of power |
-|---|---:|---:|---:|---:|---:|
-| `minerals_transition` | 7468 | 4.15 | 0.79 | 2% | 0% |
-| `sparse_game` | 4884 | 0.37 | 0.36 | 0% | 0% |
+| Scenario | Policy | Minerals | Cells | Pickups | Beacons | Beacon bonus | Flip | Out of power |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| `minerals_transition` | pre-coverage full | 6537 | 50 | 0.85 | 0.71 | 28112 | 2% | 0% |
+| `minerals_transition` | coverage_v1 | 7175 | 82 | 1.67 | 0.76 | 23287 | 1% | 0% |
+| `sparse_game` | pre-coverage full | 3696 | 39 | 0.18 | 0.26 | 8617 | 0% | 0% |
+| `sparse_game` | coverage_v1 | 4142 | 49 | 0.25 | 0.31 | 9920 | 2% | 0% |
 
-These are matched 100-episode, medium-horizon results at seed 2000 and frame
-skip 4. Do not fine-tune the exploration policy unless a new run matches or
-beats both rows. If PPO training is still required, keep the beacon guard and
-use transition plus sparse scenarios for safety-adjusted checkpoint selection.
+(The older July table — 7468/4884 minerals, 4.15/0.37 pickups — predates the
+framework reset and is no longer reproducible; compare against the rows
+above.) The coverage policy was promoted as `models/full/` on this basis. The
+one known trade is transition beacon bonus (−17%): frontier-seeking deploys
+beacons on fresher, lower-scoring ground. Tune the supervisor's
+surface-score threshold before considering PPO fine-tuning. Do not fine-tune
+the exploration policy unless a new run matches or beats the coverage rows.
+If PPO training is still required, keep the beacon guard and use transition
+plus sparse scenarios for safety-adjusted checkpoint selection.
 
 ```bash
 python examples/train.py \
