@@ -18,6 +18,7 @@ pub mod beacons;
 pub mod game_state;
 pub mod imu;
 pub mod minerals;
+pub mod mission_supervisor;
 pub mod observation;
 pub mod power_cubes;
 pub mod reward;

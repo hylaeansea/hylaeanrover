@@ -53,6 +53,42 @@ def _env_kwargs_from_args(args: argparse.Namespace) -> dict[str, Any]:
     cfg["terrain_height_scale"] = terrain_scale
     cfg["terrain_height_scale_range"] = terrain_range
     cfg["cube_spawn_seed"] = args.cube_spawn_seed
+    cfg["flip_penalty"] = args.flip_penalty
+    cfg["tilt_penalty"] = args.tilt_penalty
+    cfg["tilt_threshold_deg"] = args.tilt_threshold_deg
+    cfg["mission_supervisor"] = args.mission_supervisor
+    cfg["supervisor_low_power_enter_fraction"] = (
+        args.supervisor_low_power_enter_fraction
+    )
+    cfg["supervisor_low_power_exit_fraction"] = args.supervisor_low_power_exit_fraction
+    cfg["supervisor_path_safety_factor"] = args.supervisor_path_safety_factor
+    cfg["supervisor_reserve_distance_m"] = args.supervisor_reserve_distance_m
+    cfg["supervisor_tilt_enter_deg"] = args.supervisor_tilt_enter_deg
+    cfg["supervisor_tilt_exit_deg"] = args.supervisor_tilt_exit_deg
+    cfg["supervisor_tilt_guard_min_speed_mps"] = (
+        args.supervisor_tilt_guard_min_speed_mps
+    )
+    cfg["supervisor_target_loss_grace_decisions"] = (
+        args.supervisor_target_loss_grace_decisions
+    )
+    cfg["supervisor_beacon_first_distance_m"] = args.supervisor_beacon_first_distance_m
+    cfg["supervisor_beacon_spacing_m"] = args.supervisor_beacon_spacing_m
+    cfg["supervisor_beacon_auto_deploy"] = args.supervisor_beacon_auto_deploy
+    cfg["supervisor_beacon_surface_score_threshold"] = (
+        args.supervisor_beacon_surface_score_threshold
+    )
+    cfg["rejected_beacon_penalty"] = args.rejected_beacon_penalty
+    cfg["locomotion_power_draw_penalty"] = args.locomotion_power_draw_penalty
+    cfg["locomotion_out_of_power_penalty"] = args.locomotion_out_of_power_penalty
+    cfg["low_power_no_target_throttle_penalty"] = (
+        args.low_power_no_target_throttle_penalty
+    )
+    cfg["low_power_no_target_coast_reward"] = args.low_power_no_target_coast_reward
+    cfg["low_power_visible_stall_throttle_penalty"] = (
+        args.low_power_visible_stall_throttle_penalty
+    )
+    cfg["cube_progress_range_epsilon"] = args.cube_progress_range_epsilon
+    cfg["cube_progress_bearing_epsilon_deg"] = args.cube_progress_bearing_epsilon_deg
     if "scenario" not in cfg:
         cfg["scenario"] = args.scenario
     return cfg
@@ -135,6 +171,20 @@ def _episode_metrics(
         "visible_low_power_steps": 0.0,
         "visible_approach_rate": 0.0,
         "terrain_height_scale": float(info.get("terrain_height_scale", 1.0)),
+        "supervisor_override_rate": float(info.get("supervisor_override_rate", 0.0)),
+        "supervisor_intercept_steps": float(
+            info.get("supervisor_intercept_steps", 0.0)
+        ),
+        "supervisor_preserve_steps": float(info.get("supervisor_preserve_steps", 0.0)),
+        "supervisor_stabilize_steps": float(
+            info.get("supervisor_stabilize_steps", 0.0)
+        ),
+        "supervisor_beacon_deploy_steps": float(
+            info.get("supervisor_beacon_deploy_steps", 0.0)
+        ),
+        "supervisor_beacon_hold_steps": float(
+            info.get("supervisor_beacon_hold_steps", 0.0)
+        ),
     }
     if tracker_metrics:
         metrics.update(tracker_metrics)
@@ -284,6 +334,12 @@ def summarize(label: str, eps: list[dict[str, Any]]) -> None:
     print(f"  visible_low   mean={arr('visible_low_power_steps').mean():10.2f}")
     print(f"  approach_rate mean={arr('visible_approach_rate').mean():10.2%}")
     print(f"  terrain_scale mean={arr('terrain_height_scale').mean():10.2f}")
+    print(f"  sup_override  mean={arr('supervisor_override_rate').mean():10.2%}")
+    print(f"  sup_intercept mean={arr('supervisor_intercept_steps').mean():10.2f}")
+    print(f"  sup_preserve  mean={arr('supervisor_preserve_steps').mean():10.2f}")
+    print(f"  sup_stabilize mean={arr('supervisor_stabilize_steps').mean():10.2f}")
+    print(f"  sup_beacon_ok  mean={arr('supervisor_beacon_deploy_steps').mean():10.2f}")
+    print(f"  sup_beacon_hold mean={arr('supervisor_beacon_hold_steps').mean():9.2f}")
     print(f"  mineral       mean={arr('mineral').mean():10.2f}")
     print(f"  beacon_bonus  mean={arr('beacon_bonus').mean():10.2f}")
     print(f"  beacons_used  mean={arr('beacons_used').mean():10.2f}")
@@ -357,6 +413,53 @@ def main() -> None:
         help="usually off for acceptance evals; train can enable shaping",
     )
     p.add_argument("--low-power-threshold", type=float, default=0.45)
+    p.add_argument(
+        "--flip-penalty",
+        type=float,
+        default=50.0,
+        help="terminal penalty when the rover flips",
+    )
+    p.add_argument("--tilt-penalty", type=float, default=0.0)
+    p.add_argument("--tilt-threshold-deg", type=float, default=45.0)
+    p.add_argument("--mission-supervisor", action="store_true")
+    p.add_argument("--supervisor-low-power-enter-fraction", type=float, default=0.35)
+    p.add_argument("--supervisor-low-power-exit-fraction", type=float, default=0.50)
+    p.add_argument("--supervisor-path-safety-factor", type=float, default=1.10)
+    p.add_argument("--supervisor-reserve-distance-m", type=float, default=2.0)
+    p.add_argument("--supervisor-tilt-enter-deg", type=float, default=20.0)
+    p.add_argument("--supervisor-tilt-exit-deg", type=float, default=18.0)
+    p.add_argument("--supervisor-tilt-guard-min-speed-mps", type=float, default=1.0)
+    p.add_argument("--supervisor-target-loss-grace-decisions", type=int, default=0)
+    p.add_argument("--supervisor-beacon-first-distance-m", type=float, default=100.0)
+    p.add_argument("--supervisor-beacon-spacing-m", type=float, default=75.0)
+    p.add_argument(
+        "--supervisor-beacon-auto-deploy",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    p.add_argument(
+        "--supervisor-beacon-surface-score-threshold", type=float, default=150.0
+    )
+    p.add_argument("--rejected-beacon-penalty", type=float, default=5.0)
+    p.add_argument(
+        "--locomotion-power-draw-penalty",
+        type=float,
+        default=40.0,
+        help="penalty per battery-fraction spent in power-efficiency shaping",
+    )
+    p.add_argument(
+        "--locomotion-out-of-power-penalty",
+        type=float,
+        default=75.0,
+        help="terminal penalty for out-of-power in power-efficiency shaping",
+    )
+    p.add_argument("--low-power-no-target-throttle-penalty", type=float, default=0.25)
+    p.add_argument("--low-power-no-target-coast-reward", type=float, default=0.02)
+    p.add_argument(
+        "--low-power-visible-stall-throttle-penalty", type=float, default=0.0
+    )
+    p.add_argument("--cube-progress-range-epsilon", type=float, default=0.1)
+    p.add_argument("--cube-progress-bearing-epsilon-deg", type=float, default=1.0)
     args = p.parse_args()
     if args.horizon is not None:
         args.max_steps = HORIZON_STEPS[args.horizon]

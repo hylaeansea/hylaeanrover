@@ -27,6 +27,9 @@ use bevy::prelude::*;
 use tract_onnx::prelude::*;
 
 use hylaeanrover_core::minerals::MineralMaps;
+use hylaeanrover_core::mission_supervisor::{
+    MissionSupervisor, MissionSupervisorConfig, SupervisorMode,
+};
 use hylaeanrover_core::observation::{OBS_DIM, build_observation};
 use hylaeanrover_core::power_cubes::PowerState;
 use hylaeanrover_core::reward::RewardState;
@@ -74,6 +77,11 @@ struct AutopilotRuntime {
     /// The most recent inferred action, reused on held (non-decision)
     /// frames.
     held: RoverAction,
+    /// Optional shared mission supervisor. Enabled explicitly with
+    /// `--mission-supervisor` so existing exported policies keep their
+    /// previous behavior unless the operator opts into the safety layer.
+    supervisor: Option<MissionSupervisor>,
+    last_supervisor_mode: Option<SupervisorMode>,
 }
 
 pub struct AutopilotPlugin;
@@ -87,8 +95,13 @@ impl Plugin for AutopilotPlugin {
         match load_runtime(&onnx_path) {
             Ok(runtime) => {
                 info!(
-                    "Autopilot loaded from {}. Keys: P = toggle, O = reload.",
-                    onnx_path.display()
+                    "Autopilot loaded from {}{} Keys: P = toggle, O = reload.",
+                    onnx_path.display(),
+                    if runtime.supervisor.is_some() {
+                        " with mission supervisor."
+                    } else {
+                        "."
+                    }
                 );
                 app.insert_resource(runtime)
                     .insert_resource(RoverAction::default())
@@ -117,6 +130,10 @@ fn parse_policy_arg() -> Option<PathBuf> {
         }
     }
     None
+}
+
+fn mission_supervisor_cli_enabled() -> bool {
+    std::env::args().any(|arg| arg == "--mission-supervisor")
 }
 
 /// The normalization sidecar lives next to the ONNX file with the
@@ -200,7 +217,12 @@ fn apply_norm_overrides(default: RoverCoreConfig, norm_json: &str) -> RoverCoreC
 
 fn load_runtime(onnx_path: &Path) -> TractResult<AutopilotRuntime> {
     let policy = load_policy(onnx_path)?;
-    let (norm, frame_skip) = load_norm(&norm_path_for(onnx_path))?;
+    let (norm, frame_skip, sidecar_supervisor, beacons_enabled) =
+        load_norm(&norm_path_for(onnx_path))?;
+    let supervisor_config = MissionSupervisorConfig {
+        beacon_guard_enabled: beacons_enabled,
+        ..MissionSupervisorConfig::default()
+    };
     Ok(AutopilotRuntime {
         policy,
         norm,
@@ -208,6 +230,9 @@ fn load_runtime(onnx_path: &Path) -> TractResult<AutopilotRuntime> {
         frame_skip: frame_skip.max(1),
         tick: 0,
         held: RoverAction::default(),
+        supervisor: (mission_supervisor_cli_enabled() || sidecar_supervisor)
+            .then(|| MissionSupervisor::new(supervisor_config)),
+        last_supervisor_mode: None,
     })
 }
 
@@ -221,7 +246,7 @@ fn load_policy(path: &Path) -> TractResult<Policy> {
 
 /// Parse the `*.norm.json` sidecar: observation normalization stats plus
 /// the frame-skip the policy was trained with.
-fn load_norm(path: &Path) -> TractResult<(NormStats, u32)> {
+fn load_norm(path: &Path) -> TractResult<(NormStats, u32, bool, bool)> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?;
     let v: serde_json::Value = serde_json::from_str(&text)
@@ -250,6 +275,7 @@ fn load_norm(path: &Path) -> TractResult<(NormStats, u32)> {
     let epsilon = v["epsilon"].as_f64().unwrap_or(1e-8) as f32;
     // `frame_skip` is optional for backward compatibility (default 1).
     let frame_skip = v["frame_skip"].as_u64().unwrap_or(1) as u32;
+    let (mission_supervisor, beacons_enabled) = sidecar_runtime_flags(&v);
     Ok((
         NormStats {
             mean,
@@ -258,7 +284,16 @@ fn load_norm(path: &Path) -> TractResult<(NormStats, u32)> {
             epsilon,
         },
         frame_skip,
+        mission_supervisor,
+        beacons_enabled,
     ))
+}
+
+fn sidecar_runtime_flags(v: &serde_json::Value) -> (bool, bool) {
+    (
+        v["mission_supervisor"].as_bool().unwrap_or(false),
+        v["beacons_enabled"].as_bool().unwrap_or(true),
+    )
 }
 
 /// Map a discrete action index [0..9] to a `RoverAction`. Mirrors the
@@ -296,6 +331,10 @@ fn autopilot_drive(
         info!("Autopilot {}", if active.0 { "ON" } else { "OFF (manual)" });
         if active.0 {
             runtime.tick = 0;
+            if let Some(supervisor) = runtime.supervisor.as_mut() {
+                supervisor.reset();
+            }
+            runtime.last_supervisor_mode = None;
         } else {
             *action = RoverAction::default();
         }
@@ -327,7 +366,30 @@ fn autopilot_drive(
         let obs = build_observation(&telem, &power, &reward, chassis_pos, &maps);
         let normalized = runtime.norm.normalize(&obs);
         match infer(&runtime.policy, &normalized) {
-            Ok(index) => {
+            Ok(policy_index) => {
+                let index = if let Some(supervisor) = runtime.supervisor.as_mut() {
+                    let decision = supervisor.decide_with_context(
+                        &obs,
+                        policy_index as u32,
+                        power.max,
+                        reward.distance,
+                    );
+                    if runtime.last_supervisor_mode != Some(decision.mode) {
+                        info!(
+                            "Mission supervisor: mode={} policy_action={} action={} target_visible={} target_viable={} available_range={:.1}m",
+                            decision.mode.as_str(),
+                            decision.proposed_action,
+                            decision.action,
+                            decision.target_visible,
+                            decision.target_viable,
+                            decision.available_range_m,
+                        );
+                        runtime.last_supervisor_mode = Some(decision.mode);
+                    }
+                    decision.action as usize
+                } else {
+                    policy_index
+                };
                 let a = action_for(index);
                 runtime.held = a;
                 *action = a;
@@ -419,5 +481,16 @@ mod tests {
         }"#;
         let cfg = apply_norm_overrides(default, norm_json);
         assert_eq!(cfg.beacons_enabled, default.beacons_enabled);
+    }
+
+    #[test]
+    fn sidecar_flags_enable_supervisor_and_preserve_stage_beacon_mode() {
+        let minerals: serde_json::Value =
+            serde_json::from_str(r#"{"mission_supervisor": true, "beacons_enabled": false}"#)
+                .unwrap();
+        assert_eq!(sidecar_runtime_flags(&minerals), (true, false));
+
+        let legacy: serde_json::Value = serde_json::from_str(r#"{}"#).unwrap();
+        assert_eq!(sidecar_runtime_flags(&legacy), (false, true));
     }
 }

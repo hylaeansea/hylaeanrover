@@ -100,10 +100,18 @@ transfer across all stages:
   promotion. Forced diagnostic cubes are settled on/near terrain and the
   RL-visible cube sensor hides non-actionable airborne cubes so `OBS_DIM`
   stays fixed and the visible cube slots remain actionable.
-- **Stage 2 — Drive + minerals.** Reward = distance + cube bonus +
+- **Stage 2 — Drive + minerals.** Reward = distance +
   scarcity-weighted mineral integral. Load Stage 1 weights, continue.
-  Motor + seek skills transfer; agent now also steers toward scarce
-  ground.
+  Motor + seek skills transfer; a short mineral-explore teacher bootstrap
+  first restores the missing "cover ground while powered" prior, then PPO
+  learns the mineral reward. Power cubes are survival support, not a paid
+  objective: keep power-efficiency and low-power cube shaping active, but
+  train primarily on no-cube / sparse-cube mineral exploration scenarios
+  so the exported policy searches terrain instead of waiting for cube
+  drops. Stage 2 trains and evaluates on the medium horizon, adds dense
+  excessive-tilt shaping, and selects checkpoints by a robust reward
+  statistic with an explicit terminal-failure cost. A short-horizon mean
+  reward hid both late failures and rare mineral-return outliers.
 - **Stage 3 — Full mission.** Reward adds the beacon bonus; `beacons_enabled`
   on so action 9 places beacons and `BeaconsDeployed` can end the run. Load
   Stage 2 weights, continue. Agent already drives, seeks cubes, and finds
@@ -215,8 +223,17 @@ Dir: `python/` (add extras as needed: `tensorboard`).
 6. `train.py --stage power_idle --load runs/stage1_cube_intercept/best/best_model.zip --vecnorm runs/stage1_cube_intercept/best/vecnorm.pkl --reset-reward-stats --scenario power_idle --teacher-pretrain-samples 20000 --teacher-scenarios power_idle,cube_intercept_low_power --teacher-pretrain-only --save runs/stage1_power_idle_bc`
 7. `train.py --stage power_cubes --load runs/stage1_power_idle_bc/best/best_model.zip --vecnorm runs/stage1_power_idle_bc/best/vecnorm.pkl --reset-reward-stats --save runs/stage1_power_cubes`
    → evaluate against `docs/rl_stage0_stage1_hardening_plan.md` gates.
-   Only after those pass, repeat for `--stage minerals` and `--stage full`.
-7. Watch `tensorboard --logdir runs/` for `rollout/ep_rew_mean` and
+8. `train.py --stage minerals --load runs/stage1_power_cubes/best/best_model.zip --vecnorm runs/stage1_power_cubes/best/vecnorm.pkl --reset-reward-stats --scenario minerals_explore --low-power-threshold 0.35 --teacher-pretrain-samples 75000 --teacher-scenarios minerals_explore,minerals_sparse,minerals_transition,transition,no_cube_control --teacher-pretrain-only --save runs/stage2_minerals_bc`
+9. `train.py --stage minerals --load runs/stage2_minerals_bc/model.zip --vecnorm runs/stage2_minerals_bc/vecnorm.pkl --reset-reward-stats --horizon medium --scenario minerals_sparse --low-power-threshold 0.35 --locomotion-out-of-power-penalty 1500 --flip-penalty 1500 --tilt-penalty 5 --tilt-threshold-deg 45 --eval-selection-stat median --eval-failure-penalty 10000 --selection-extra-scenarios transition --ignored-cube-penalty 500 --mission-supervisor --save runs/stage2_minerals`
+   → evaluate mineral exploration, sparse-cube survival, and Stage 1
+   regression gates before promoting.
+10. After those pass, evaluate the accepted minerals policy with `--stage full --mission-supervisor`.
+   The shared controller requires 100 m before the first
+   beacon, 75 m spacing, and a scarcity-weighted surface score of 150. Keep the
+   exploration policy frozen when this hierarchical candidate passes; direct
+   full-stage PPO is optional and must beat the transition and sparse mineral,
+   pickup, beacon, and terminal-failure gates before replacing it.
+11. Watch `tensorboard --logdir runs/` for `rollout/ep_rew_mean` and
    `ep_len_mean` rising.
 
 ## Files to modify
@@ -244,7 +261,8 @@ python examples/export_policy.py \
     --model runs/stage0/model.zip --vecnorm runs/stage0/vecnorm.pkl
 
 # 2. Watch it in the real game.
-cargo run -p hylaeanrover_game --release -- --policy runs/stage0/model.onnx
+cargo run -p hylaeanrover_game --release -- \
+  --policy runs/stage0/model.onnx --mission-supervisor
 ```
 
 In-game keys: **P** toggles autopilot on/off (off → keyboard takes

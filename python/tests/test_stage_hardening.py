@@ -3,17 +3,21 @@ import unittest
 import gymnasium as gym
 import numpy as np
 
+from examples.train import SafetyEvalCallback
+
 from hylaeanrover import OBS_DIM, RoverEnv
 from hylaeanrover.teacher import (
     CUBE_OBS_START,
     POWER_OBS_INDEX,
     CubeInterceptTeacher,
+    MineralExploreTeacher,
     PowerIdleTeacher,
 )
 from hylaeanrover.wrappers import (
     CUBE_SHAPING_MODES,
     CUBE_SPAWN_PRESETS,
     LOCOMOTION_SHAPING_MODES,
+    MissionSupervisorWrapper,
     STAGE_WEIGHTS,
     StagedRewardWrapper,
     apply_scenario_defaults,
@@ -23,6 +27,23 @@ from hylaeanrover.wrappers import (
 
 
 class StageHardeningPresetTests(unittest.TestCase):
+    def test_safety_eval_selection_resists_reward_outliers_and_failures(self) -> None:
+        score, reward_stat, failure_rate = SafetyEvalCallback.selection_score(
+            [100.0, 110.0, 120.0, 80_000.0],
+            failure_count=1,
+            selection_stat="median",
+            failure_penalty=10_000.0,
+        )
+        self.assertEqual(reward_stat, 115.0)
+        self.assertEqual(failure_rate, 0.25)
+        self.assertEqual(score, -2385.0)
+
+    def test_safety_eval_selection_uses_the_worst_transition_scenario(self) -> None:
+        score = SafetyEvalCallback.composite_selection_score(
+            {"minerals_transition": 3_000.0, "transition": 1_500.0}
+        )
+        self.assertEqual(score, 1_500.0)
+
     def test_named_presets_cover_dense_sparse_and_no_cube_controls(self) -> None:
         self.assertGreater(CUBE_SPAWN_PRESETS["dense_training"]["lambda"], 1.0)
         self.assertEqual(CUBE_SPAWN_PRESETS["bridge_training"]["lambda"], 0.75)
@@ -39,6 +60,11 @@ class StageHardeningPresetTests(unittest.TestCase):
         )
         self.assertEqual(STAGE_WEIGHTS["power_idle"]["distance"], 0.0)
         self.assertEqual(STAGE_WEIGHTS["power_idle"]["cube"], 0.0)
+
+    def test_minerals_stage_does_not_directly_reward_cube_pickups(self) -> None:
+        self.assertEqual(STAGE_WEIGHTS["minerals"]["cube"], 0.0)
+        self.assertGreater(STAGE_WEIGHTS["minerals"]["distance"], 0.0)
+        self.assertGreater(STAGE_WEIGHTS["minerals"]["mineral"], 0.0)
 
     def test_scenario_defaults_can_be_overridden(self) -> None:
         cfg = apply_scenario_defaults(
@@ -81,6 +107,18 @@ class StageHardeningPresetTests(unittest.TestCase):
         self.assertEqual(close_cfg["cube_spawn_preset"], "none")
         self.assertEqual(close_cfg["forced_cube_distance_range"], (15.0, 20.0))
         self.assertEqual(close_cfg["forced_cube_bearing_range"], (0.0, 5.0))
+
+    def test_minerals_explore_scenario_has_no_power_cube_spawns(self) -> None:
+        cfg = apply_scenario_defaults("minerals_explore")
+        self.assertEqual(cfg["cube_spawn_preset"], "none")
+        self.assertEqual(cfg["terrain_height"], "mixed_1_2")
+        self.assertEqual(cfg["cube_shaping"], "off")
+
+    def test_minerals_sparse_scenario_uses_sparse_survival_cubes(self) -> None:
+        cfg = apply_scenario_defaults("minerals_sparse")
+        self.assertEqual(cfg["cube_spawn_preset"], "sparse_game")
+        self.assertEqual(cfg["terrain_height"], "mixed_1_2")
+        self.assertEqual(cfg["cube_shaping"], "low_power")
 
     def test_power_idle_scenario_is_low_power_no_cube_control(self) -> None:
         cfg = apply_scenario_defaults("power_idle")
@@ -220,6 +258,57 @@ class NativeResetInstrumentationTests(unittest.TestCase):
         obs[CUBE_OBS_START + 1] = 30.0
         obs[CUBE_OBS_START + 2] = 1.0
         self.assertEqual(PowerIdleTeacher().action(obs), 7)
+
+    def test_mineral_explore_teacher_drives_when_power_is_healthy(self) -> None:
+        obs = np.zeros(OBS_DIM, dtype=np.float32)
+        obs[POWER_OBS_INDEX] = 0.90
+        self.assertEqual(MineralExploreTeacher().action(obs), 7)
+
+    def test_mineral_explore_teacher_ignores_cubes_while_power_is_healthy(
+        self,
+    ) -> None:
+        obs = np.zeros(OBS_DIM, dtype=np.float32)
+        obs[POWER_OBS_INDEX] = 0.90
+        obs[CUBE_OBS_START] = 25.0
+        obs[CUBE_OBS_START + 1] = 30.0
+        obs[CUBE_OBS_START + 2] = 1.0
+        self.assertEqual(MineralExploreTeacher().action(obs), 7)
+
+    def test_mineral_explore_teacher_intercepts_visible_cube_while_recovering(
+        self,
+    ) -> None:
+        obs = np.zeros(OBS_DIM, dtype=np.float32)
+        obs[POWER_OBS_INDEX] = 0.30
+        obs[CUBE_OBS_START] = 25.0
+        obs[CUBE_OBS_START + 1] = 30.0
+        obs[CUBE_OBS_START + 2] = 1.0
+        self.assertEqual(MineralExploreTeacher().action(obs), 6)
+
+    def test_mineral_explore_teacher_recovers_until_resume_threshold(self) -> None:
+        teacher = MineralExploreTeacher(
+            low_power_threshold=0.45,
+            resume_power_threshold=0.65,
+        )
+        obs = np.zeros(OBS_DIM, dtype=np.float32)
+
+        obs[POWER_OBS_INDEX] = 0.40
+        self.assertEqual(teacher.action(obs), 4)
+
+        obs[POWER_OBS_INDEX] = 0.60
+        self.assertEqual(teacher.action(obs), 4)
+
+        obs[POWER_OBS_INDEX] = 0.70
+        self.assertEqual(teacher.action(obs), 7)
+
+    def test_mineral_explore_teacher_reset_clears_recovery_state(self) -> None:
+        teacher = MineralExploreTeacher()
+        obs = np.zeros(OBS_DIM, dtype=np.float32)
+        obs[POWER_OBS_INDEX] = 0.30
+        self.assertEqual(teacher.action(obs), 4)
+
+        teacher.reset()
+        obs[POWER_OBS_INDEX] = 0.50
+        self.assertEqual(teacher.action(obs), 7)
 
     def test_teacher_handles_previous_sparse_visible_low_power_failure(self) -> None:
         cfg = apply_scenario_defaults(
@@ -371,7 +460,174 @@ class _VisibleCubeEnv(_OneStepEnv):
         return obs, reward, terminated, truncated, info
 
 
+class _SupervisorEnv(gym.Env):
+    action_space = gym.spaces.Discrete(10)
+    observation_space = gym.spaces.Box(
+        low=-np.inf, high=np.inf, shape=(OBS_DIM,), dtype=np.float32
+    )
+
+    def __init__(
+        self,
+        *,
+        power_frac: float,
+        cube: tuple[float, float] | None = None,
+        distance_m: float = 0.0,
+        beacons_remaining: float = 5.0,
+    ) -> None:
+        self.power_frac = power_frac
+        self.cube = cube
+        self.distance_m = distance_m
+        self.beacons_remaining = beacons_remaining
+        self.last_action: int | None = None
+
+    def _obs(self) -> np.ndarray:
+        obs = np.zeros(OBS_DIM, dtype=np.float32)
+        obs[POWER_OBS_INDEX] = self.power_frac
+        obs[-1] = self.beacons_remaining
+        if self.cube is not None:
+            bearing, distance = self.cube
+            obs[CUBE_OBS_START] = bearing
+            obs[CUBE_OBS_START + 1] = distance
+            obs[CUBE_OBS_START + 2] = 1.0
+        return obs
+
+    def reset(self, *, seed=None, options=None):
+        super().reset(seed=seed)
+        self.last_action = None
+        return self._obs(), {"reward_distance": self.distance_m}
+
+    def step(self, action):
+        self.last_action = int(action)
+        return self._obs(), 0.0, False, False, {"reward_distance": self.distance_m}
+
+
+class MissionSupervisorWrapperTests(unittest.TestCase):
+    def test_low_power_without_cube_overrides_policy_to_coast(self) -> None:
+        base = _SupervisorEnv(power_frac=0.30)
+        env = MissionSupervisorWrapper(base, power_capacity_wh=100.0)
+        env.reset()
+        _, _, _, _, info = env.step(7)
+        self.assertEqual(base.last_action, 4)
+        self.assertTrue(info["supervisor_overrode"])
+        self.assertEqual(info["supervisor_mode"], "preserve")
+
+    def test_healthy_power_preserves_policy_action(self) -> None:
+        base = _SupervisorEnv(power_frac=0.90)
+        env = MissionSupervisorWrapper(base, power_capacity_wh=100.0)
+        env.reset()
+        _, _, _, _, info = env.step(2)
+        self.assertEqual(base.last_action, 2)
+        self.assertFalse(info["supervisor_overrode"])
+        self.assertEqual(info["supervisor_mode"], "explore")
+
+    def test_mid_power_remains_in_exploration_mode(self) -> None:
+        base = _SupervisorEnv(power_frac=0.40)
+        env = MissionSupervisorWrapper(base, power_capacity_wh=100.0)
+        env.reset()
+        _, _, _, _, info = env.step(7)
+        self.assertEqual(base.last_action, 7)
+        self.assertFalse(info["supervisor_overrode"])
+        self.assertEqual(info["supervisor_mode"], "explore")
+
+    def test_reachable_cube_uses_intercept_controller(self) -> None:
+        base = _SupervisorEnv(power_frac=0.30, cube=(15.0, 30.0))
+        env = MissionSupervisorWrapper(base, power_capacity_wh=100.0)
+        env.reset()
+        _, _, _, _, info = env.step(4)
+        self.assertEqual(base.last_action, 6)
+        self.assertEqual(info["supervisor_mode"], "intercept")
+        self.assertTrue(info["supervisor_target_viable"])
+
+    def test_beacon_guard_requires_exploration_distance(self) -> None:
+        early = _SupervisorEnv(power_frac=0.90, distance_m=50.0)
+        early_env = MissionSupervisorWrapper(
+            early,
+            power_capacity_wh=100.0,
+            beacon_guard_enabled=True,
+        )
+        early_env.reset()
+        _, _, _, _, early_info = early_env.step(9)
+        self.assertEqual(early.last_action, 4)
+        self.assertEqual(early_info["supervisor_mode"], "beacon_hold")
+
+        ready = _SupervisorEnv(power_frac=0.90, distance_m=100.0)
+        ready_env = MissionSupervisorWrapper(
+            ready,
+            power_capacity_wh=100.0,
+            beacon_guard_enabled=True,
+        )
+        ready_env.reset()
+        _, _, _, _, ready_info = ready_env.step(9)
+        self.assertEqual(ready.last_action, 9)
+        self.assertEqual(ready_info["supervisor_mode"], "beacon_deploy")
+
+
+class _VisibleCubeSequenceEnv(_OneStepEnv):
+    def __init__(self, observations: list[tuple[float, float]]) -> None:
+        super().__init__(distance=0.0, power_frac=0.30, reset_power_frac=0.30)
+        self.observations = observations
+        self.index = 0
+
+    def reset(self, *, seed=None, options=None):
+        self.index = 0
+        return super().reset(seed=seed, options=options)
+
+    def step(self, action):
+        obs, reward, terminated, truncated, info = super().step(action)
+        nearest, bearing = self.observations[
+            min(self.index, len(self.observations) - 1)
+        ]
+        self.index += 1
+        info.update(
+            {
+                "visible_cube_count": 1,
+                "nearest_visible_cube_range": nearest,
+                "nearest_visible_cube_bearing": bearing,
+            }
+        )
+        return obs, reward, terminated, truncated, info
+
+
+class _TiltEnv(_OneStepEnv):
+    def __init__(self, *, pitch: float = 0.0, roll: float = 0.0) -> None:
+        super().__init__(distance=0.0, power_frac=1.0)
+        self.pitch = pitch
+        self.roll = roll
+
+    def step(self, action):
+        obs, reward, terminated, truncated, info = super().step(action)
+        obs[2] = self.pitch
+        obs[3] = self.roll
+        return obs, reward, terminated, truncated, info
+
+
 class LocomotionPowerShapingTests(unittest.TestCase):
+    def test_tilt_shaping_ignores_normal_terrain_attitude(self) -> None:
+        env = StagedRewardWrapper(
+            _TiltEnv(pitch=30.0, roll=-40.0),
+            stage="minerals",
+            locomotion_shaping="off",
+            tilt_penalty=5.0,
+            tilt_threshold_deg=45.0,
+        )
+        env.reset()
+        _, reward, _, _, info = env.step(7)
+        self.assertEqual(reward, 0.0)
+        self.assertEqual(info["tilt_penalty_total"], 0.0)
+
+    def test_tilt_shaping_penalizes_preterminal_rollover_risk(self) -> None:
+        env = StagedRewardWrapper(
+            _TiltEnv(roll=100.0),
+            stage="minerals",
+            locomotion_shaping="off",
+            tilt_penalty=5.0,
+            tilt_threshold_deg=45.0,
+        )
+        env.reset()
+        _, reward, _, _, info = env.step(7)
+        self.assertAlmostEqual(reward, -5.0)
+        self.assertAlmostEqual(info["tilt_penalty_total"], 5.0)
+
     def test_power_efficiency_rewards_coasting_distance(self) -> None:
         env = StagedRewardWrapper(
             _OneStepEnv(distance=10.0, power_frac=1.0),
@@ -407,6 +663,30 @@ class LocomotionPowerShapingTests(unittest.TestCase):
         self.assertLess(reward, 0.0)
         self.assertEqual(info["locomotion_shaping"], "power_efficiency")
 
+    def test_minerals_power_efficiency_penalizes_sprint_to_empty(self) -> None:
+        env = StagedRewardWrapper(
+            _OneStepEnv(distance=10.0, power_frac=0.0, game_over="out_of_power"),
+            stage="minerals",
+            locomotion_shaping="power_efficiency",
+            cube_shaping="off",
+        )
+        env.reset()
+        _, reward, terminated, _, info = env.step(7)
+        self.assertTrue(terminated)
+        self.assertLess(reward, 0.0)
+        self.assertEqual(info["locomotion_shaping"], "power_efficiency")
+
+    def test_minerals_reward_ignores_raw_cube_bonus(self) -> None:
+        env = StagedRewardWrapper(
+            _OneStepEnv(distance=0.0, power_frac=1.0, cube_bonus=100.0),
+            stage="minerals",
+            locomotion_shaping="off",
+            cube_shaping="off",
+        )
+        env.reset()
+        _, reward, _, _, _ = env.step(7)
+        self.assertEqual(reward, 0.0)
+
     def test_power_idle_penalizes_low_power_no_target_motor_action(self) -> None:
         env = StagedRewardWrapper(
             _OneStepEnv(distance=0.0, power_frac=0.30, reset_power_frac=0.30),
@@ -433,6 +713,19 @@ class LocomotionPowerShapingTests(unittest.TestCase):
         self.assertGreater(reward, 0.0)
         self.assertEqual(info["low_power_no_target_steps"], 1)
 
+    def test_minerals_penalizes_low_power_no_target_motor_action(self) -> None:
+        env = StagedRewardWrapper(
+            _OneStepEnv(distance=0.0, power_frac=0.30, reset_power_frac=0.30),
+            stage="minerals",
+            locomotion_shaping="power_efficiency",
+            low_power_no_target_throttle_penalty=0.5,
+            low_power_no_target_coast_reward=0.1,
+        )
+        env.reset()
+        _, reward, _, _, info = env.step(7)
+        self.assertLess(reward, 0.0)
+        self.assertEqual(info["low_power_no_target_steps"], 1)
+
     def test_power_cubes_no_target_penalty_ignores_visible_cube(self) -> None:
         env = StagedRewardWrapper(
             _VisibleCubeEnv(power_frac=0.30, bearing=0.0, reset_power_frac=0.30),
@@ -445,6 +738,52 @@ class LocomotionPowerShapingTests(unittest.TestCase):
         _, reward, _, _, info = env.step(7)
         self.assertEqual(reward, 0.0)
         self.assertEqual(info["low_power_no_target_steps"], 0)
+
+    def test_minerals_no_target_penalty_ignores_visible_cube(self) -> None:
+        env = StagedRewardWrapper(
+            _VisibleCubeEnv(power_frac=0.30, bearing=0.0, reset_power_frac=0.30),
+            stage="minerals",
+            locomotion_shaping="power_efficiency",
+            cube_shaping="off",
+            low_power_no_target_throttle_penalty=0.5,
+        )
+        env.reset()
+        _, reward, _, _, info = env.step(7)
+        self.assertEqual(reward, 0.0)
+        self.assertEqual(info["low_power_no_target_steps"], 0)
+
+    def test_low_power_visible_stall_penalizes_unproductive_motor_action(self) -> None:
+        env = StagedRewardWrapper(
+            _VisibleCubeSequenceEnv([(20.0, 15.0), (20.0, 15.0)]),
+            stage="minerals",
+            locomotion_shaping="power_efficiency",
+            cube_shaping="off",
+            low_power_visible_stall_throttle_penalty=0.5,
+        )
+        env.reset()
+        _, first_reward, _, _, _ = env.step(7)
+        _, second_reward, _, _, info = env.step(7)
+        self.assertEqual(first_reward, 0.0)
+        self.assertEqual(second_reward, -0.5)
+        self.assertEqual(info["low_power_visible_stall_steps"], 1)
+        self.assertEqual(info["low_power_visible_stall_penalty_total"], 0.5)
+
+    def test_low_power_visible_progress_preserves_committed_intercept(self) -> None:
+        env = StagedRewardWrapper(
+            _VisibleCubeSequenceEnv([(20.0, 20.0), (20.0, 15.0), (19.5, 15.0)]),
+            stage="minerals",
+            locomotion_shaping="power_efficiency",
+            cube_shaping="off",
+            low_power_visible_stall_throttle_penalty=0.5,
+        )
+        env.reset()
+        env.step(7)
+        _, turn_reward, _, _, turn_info = env.step(7)
+        _, approach_reward, _, _, approach_info = env.step(7)
+        self.assertEqual(turn_reward, 0.0)
+        self.assertEqual(approach_reward, 0.0)
+        self.assertEqual(turn_info["low_power_visible_stall_steps"], 0)
+        self.assertEqual(approach_info["low_power_visible_stall_steps"], 0)
 
 
 class CubeShapingTests(unittest.TestCase):
@@ -463,6 +802,20 @@ class CubeShapingTests(unittest.TestCase):
         env = StagedRewardWrapper(
             _VisibleCubeEnv(power_frac=1.0, bearing=0.0),
             stage="power_cubes",
+            cube_shaping="intercept",
+            cube_heading_reward=1.0,
+        )
+        env.reset()
+        _, reward, _, _, info = env.step(0)
+        self.assertGreater(reward, 0.0)
+        self.assertEqual(info["cube_shaping"], "intercept")
+
+    def test_minerals_intercept_cube_shaping_rewards_high_power_alignment(
+        self,
+    ) -> None:
+        env = StagedRewardWrapper(
+            _VisibleCubeEnv(power_frac=1.0, bearing=0.0),
+            stage="minerals",
             cube_shaping="intercept",
             cube_heading_reward=1.0,
         )

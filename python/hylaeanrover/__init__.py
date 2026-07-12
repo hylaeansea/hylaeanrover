@@ -22,6 +22,7 @@ import numpy as np
 from gymnasium import spaces
 
 from hylaeanrover._native import RoverEnv as _RustRoverEnv
+from hylaeanrover._native import MissionSupervisor as MissionSupervisorCore
 
 
 class RoverEnv(gym.Env):
@@ -196,4 +197,5 @@ __all__ = [
     "ACTION_COUNT",
     "FIXED_DT",
     "BEACON_BUDGET",
+    "MissionSupervisorCore",
 ]

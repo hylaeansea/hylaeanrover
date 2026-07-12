@@ -73,6 +73,7 @@ def export_policy(
     out_onnx: PathLike,
     stage: str = "full",
     frame_skip: int = 1,
+    mission_supervisor: bool = False,
     opset: int = 17,
 ) -> tuple[Path, Path]:
     """Export `model_path` (+ `vecnorm_path`) to `out_onnx` + sibling
@@ -119,6 +120,9 @@ def export_policy(
         # matters).
         "beacons_enabled": bool(raw_env.beacons_enabled),
         "power_capacity_wh": float(raw_env.power_capacity),
+        # Deployment controller required by hierarchical mineral/full
+        # candidates. The game also accepts the legacy CLI flag.
+        "mission_supervisor": bool(mission_supervisor),
     }
     venv.close()
     if len(stats["mean"]) != OBS_DIM:

@@ -37,6 +37,9 @@ use bevy::time::TimeUpdateStrategy;
 use bevy::transform::TransformPlugin;
 
 use hylaeanrover_core::game_state::{GameOverReason, GameState, GameStatus};
+use hylaeanrover_core::mission_supervisor::{
+    MissionSupervisor as CoreMissionSupervisor, MissionSupervisorConfig,
+};
 use hylaeanrover_core::power_cubes::{
     ForcedPowerCubeSpawn, PowerCubeRng, PowerState, RelaunchEvent,
 };
@@ -57,6 +60,165 @@ const FIXED_DT: f32 = 1.0 / 60.0;
 /// headless env and the in-game autopilot feed the policy *identical*
 /// vectors.
 const OBS_DIM: usize = hylaeanrover_core::observation::OBS_DIM;
+
+/// Stateful wrapper around the shared Rust mission supervisor. Python calls
+/// this once per policy decision outside ActionRepeat, matching the in-game
+/// autopilot's frame-skip cadence.
+#[pyclass]
+struct MissionSupervisor {
+    inner: RefCell<CoreMissionSupervisor>,
+}
+
+type PySupervisorDecision = (u32, String, bool, bool, bool, Option<f32>, f32);
+
+#[pymethods]
+impl MissionSupervisor {
+    #[new]
+    #[pyo3(signature = (
+        low_power_enter_fraction = 0.35,
+        low_power_exit_fraction = 0.50,
+        path_safety_factor = 1.10,
+        reserve_distance_m = 2.0,
+        drain_wh_per_meter = 0.5,
+        tilt_enter_deg = 20.0,
+        tilt_exit_deg = 18.0,
+        tilt_guard_min_speed_mps = 1.0,
+        bearing_deadband_deg = 6.0,
+        pickup_hold_range_m = 3.0,
+        target_loss_grace_decisions = 0,
+        beacon_guard_enabled = true,
+        beacon_first_distance_m = 100.0,
+        beacon_spacing_m = 75.0,
+        beacon_auto_deploy = true,
+        beacon_surface_score_threshold = 150.0
+    ))]
+    fn new(
+        low_power_enter_fraction: f32,
+        low_power_exit_fraction: f32,
+        path_safety_factor: f32,
+        reserve_distance_m: f32,
+        drain_wh_per_meter: f32,
+        tilt_enter_deg: f32,
+        tilt_exit_deg: f32,
+        tilt_guard_min_speed_mps: f32,
+        bearing_deadband_deg: f32,
+        pickup_hold_range_m: f32,
+        target_loss_grace_decisions: u32,
+        beacon_guard_enabled: bool,
+        beacon_first_distance_m: f32,
+        beacon_spacing_m: f32,
+        beacon_auto_deploy: bool,
+        beacon_surface_score_threshold: f32,
+    ) -> PyResult<Self> {
+        if !low_power_enter_fraction.is_finite()
+            || !low_power_exit_fraction.is_finite()
+            || !(0.0..=1.0).contains(&low_power_enter_fraction)
+            || !(0.0..=1.0).contains(&low_power_exit_fraction)
+            || low_power_exit_fraction <= low_power_enter_fraction
+        {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "supervisor power thresholds must be finite in [0, 1] with exit > enter",
+            ));
+        }
+        for (name, value) in [
+            ("path_safety_factor", path_safety_factor),
+            ("drain_wh_per_meter", drain_wh_per_meter),
+            ("tilt_enter_deg", tilt_enter_deg),
+            ("tilt_guard_min_speed_mps", tilt_guard_min_speed_mps),
+            ("bearing_deadband_deg", bearing_deadband_deg),
+            ("pickup_hold_range_m", pickup_hold_range_m),
+            ("beacon_first_distance_m", beacon_first_distance_m),
+            ("beacon_spacing_m", beacon_spacing_m),
+            (
+                "beacon_surface_score_threshold",
+                beacon_surface_score_threshold,
+            ),
+        ] {
+            if !value.is_finite() || value <= 0.0 {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "{name} must be positive and finite"
+                )));
+            }
+        }
+        if !reserve_distance_m.is_finite() || reserve_distance_m < 0.0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "reserve_distance_m must be finite and non-negative",
+            ));
+        }
+        if !tilt_exit_deg.is_finite() || tilt_exit_deg < 0.0 || tilt_exit_deg >= tilt_enter_deg {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "tilt thresholds must be finite with 0 <= exit < enter",
+            ));
+        }
+
+        let config = MissionSupervisorConfig {
+            low_power_enter_fraction,
+            low_power_exit_fraction,
+            path_safety_factor,
+            reserve_distance_m,
+            drain_wh_per_meter,
+            tilt_enter_deg,
+            tilt_exit_deg,
+            tilt_guard_min_speed_mps,
+            bearing_deadband_deg,
+            pickup_hold_range_m,
+            target_loss_grace_decisions,
+            beacon_guard_enabled,
+            beacon_first_distance_m,
+            beacon_spacing_m,
+            beacon_auto_deploy,
+            beacon_surface_score_threshold,
+        };
+        Ok(Self {
+            inner: RefCell::new(CoreMissionSupervisor::new(config)),
+        })
+    }
+
+    fn reset(&self) {
+        self.inner.borrow_mut().reset();
+    }
+
+    #[pyo3(signature = (observation, proposed_action, power_capacity_wh, distance_m = 0.0))]
+    fn decide(
+        &self,
+        observation: Vec<f32>,
+        proposed_action: u32,
+        power_capacity_wh: f32,
+        distance_m: f32,
+    ) -> PyResult<PySupervisorDecision> {
+        if !power_capacity_wh.is_finite() || power_capacity_wh <= 0.0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "power_capacity_wh must be positive and finite",
+            ));
+        }
+        if observation.len() != OBS_DIM {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "observation length {} != OBS_DIM {OBS_DIM}",
+                observation.len()
+            )));
+        }
+        if !distance_m.is_finite() || distance_m < 0.0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "distance_m must be finite and non-negative",
+            ));
+        }
+        let decision = self.inner.borrow_mut().decide_with_context(
+            &observation,
+            proposed_action,
+            power_capacity_wh,
+            distance_m,
+        );
+        Ok((
+            decision.action,
+            decision.mode.as_str().to_owned(),
+            decision.overrode,
+            decision.target_visible,
+            decision.target_viable,
+            decision.target_range_m,
+            decision.available_range_m,
+        ))
+    }
+}
 
 /// Bevy's `App` is `!Send`, so we mark the pyclass `unsendable` —
 /// Python can only access the env from the thread that created it.
@@ -684,5 +846,6 @@ fn make_info(inner: &EnvInner) -> String {
 #[pymodule]
 fn _native(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<RoverEnv>()?;
+    m.add_class::<MissionSupervisor>()?;
     Ok(())
 }

@@ -49,6 +49,11 @@ def main() -> None:
         default=1,
         help="frame-skip used in training; recorded so the autopilot matches it",
     )
+    p.add_argument(
+        "--mission-supervisor",
+        action="store_true",
+        help="record that the in-game runtime must enable the shared supervisor",
+    )
     args = p.parse_args()
 
     out_onnx = Path(args.out) if args.out else Path(args.model).with_suffix(".onnx")
@@ -58,6 +63,7 @@ def main() -> None:
         out_onnx,
         stage=args.stage,
         frame_skip=args.frame_skip,
+        mission_supervisor=args.mission_supervisor,
         opset=args.opset,
     )
     print(f"Wrote {onnx}")

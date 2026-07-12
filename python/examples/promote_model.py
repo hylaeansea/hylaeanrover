@@ -74,6 +74,11 @@ def main() -> None:
         default=str(REPO_ROOT / "models"),
         help="tracked models directory (default: <repo>/models)",
     )
+    p.add_argument(
+        "--mission-supervisor",
+        action="store_true",
+        help="record and auto-enable the shared in-game mission supervisor",
+    )
     args = p.parse_args()
 
     src_model, src_vecnorm = _source_pair(Path(args.run), args.source)
@@ -93,6 +98,7 @@ def main() -> None:
         dest_dir / "model.onnx",
         stage=args.stage,
         frame_skip=args.frame_skip,
+        mission_supervisor=args.mission_supervisor,
     )
     print(f"Exported {onnx}")
     print(f"Exported {norm}")

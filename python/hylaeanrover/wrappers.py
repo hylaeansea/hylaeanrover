@@ -24,7 +24,7 @@ from typing import Any, Optional
 
 import gymnasium as gym
 
-from hylaeanrover import RoverEnv
+from hylaeanrover import MissionSupervisorCore, RoverEnv
 
 # Per-stage weights on the four reward components. The component values
 # themselves come from the Rust reward (distance in meters, the flat
@@ -51,8 +51,11 @@ STAGE_WEIGHTS: dict[str, dict[str, float]] = {
     # dies; later stages reintroduce travel objectives after pickup behavior
     # is reliable.
     "power_cubes": {"distance": 0.0, "cube": 1.0, "mineral": 0.0, "beacon": 0.0},
-    # Also reward crossing scarce-mineral ground.
-    "minerals": {"distance": 1.0, "cube": 1.0, "mineral": 1.0, "beacon": 0.0},
+    # Also reward crossing scarce-mineral ground. Power cubes are survival
+    # tools in Stage 2, not the objective: the policy should pick them up
+    # because power enables more distance/mineral reward, not because the
+    # pickup itself is paid like it was in Stage 1.
+    "minerals": {"distance": 1.0, "cube": 0.0, "mineral": 1.0, "beacon": 0.0},
     # Full mission, including strategic beacon placement.
     "full": {"distance": 1.0, "cube": 1.0, "mineral": 1.0, "beacon": 1.0},
 }
@@ -201,6 +204,26 @@ EVAL_SCENARIOS: dict[str, dict[str, Any]] = {
         "forced_cube_bearing_range": (-35.0, 35.0),
         "cube_shaping": "intercept",
     },
+    "minerals_explore": {
+        "cube_spawn_preset": "none",
+        "terrain_height": "mixed_1_2",
+        "cube_shaping": "off",
+    },
+    "minerals_sparse": {
+        "cube_spawn_preset": "sparse_game",
+        "terrain_height": "mixed_1_2",
+        "cube_shaping": "low_power",
+    },
+    "minerals_transition": {
+        "cube_spawn_preset": "transition",
+        "terrain_height": "mixed_1_2",
+        "cube_shaping": "low_power",
+    },
+    "minerals_fixed_2_sparse": {
+        "cube_spawn_preset": "sparse_game",
+        "terrain_height": "fixed_2_0",
+        "cube_shaping": "low_power",
+    },
     "terrain_fixed_1_0": {"terrain_height": "fixed_1_0"},
     "terrain_fixed_1_5": {"terrain_height": "fixed_1_5"},
     "terrain_fixed_2_0": {"terrain_height": "fixed_2_0"},
@@ -300,11 +323,152 @@ class ActionRepeat(gym.Wrapper):
         return obs, total_reward, terminated, truncated, info
 
 
+class MissionSupervisorWrapper(gym.Wrapper):
+    """Apply the shared Rust mission supervisor once per policy decision."""
+
+    def __init__(
+        self,
+        env: gym.Env,
+        *,
+        power_capacity_wh: float,
+        low_power_enter_fraction: float = 0.35,
+        low_power_exit_fraction: float = 0.50,
+        path_safety_factor: float = 1.10,
+        reserve_distance_m: float = 2.0,
+        tilt_enter_deg: float = 20.0,
+        tilt_exit_deg: float = 18.0,
+        tilt_guard_min_speed_mps: float = 1.0,
+        target_loss_grace_decisions: int = 0,
+        beacon_guard_enabled: bool = False,
+        beacon_first_distance_m: float = 100.0,
+        beacon_spacing_m: float = 75.0,
+        beacon_auto_deploy: bool = True,
+        beacon_surface_score_threshold: float = 150.0,
+    ) -> None:
+        super().__init__(env)
+        self.power_capacity_wh = float(power_capacity_wh)
+        self._supervisor = MissionSupervisorCore(
+            low_power_enter_fraction=low_power_enter_fraction,
+            low_power_exit_fraction=low_power_exit_fraction,
+            path_safety_factor=path_safety_factor,
+            reserve_distance_m=reserve_distance_m,
+            tilt_enter_deg=tilt_enter_deg,
+            tilt_exit_deg=tilt_exit_deg,
+            tilt_guard_min_speed_mps=tilt_guard_min_speed_mps,
+            target_loss_grace_decisions=target_loss_grace_decisions,
+            beacon_guard_enabled=beacon_guard_enabled,
+            beacon_first_distance_m=beacon_first_distance_m,
+            beacon_spacing_m=beacon_spacing_m,
+            beacon_auto_deploy=beacon_auto_deploy,
+            beacon_surface_score_threshold=beacon_surface_score_threshold,
+        )
+        self._last_obs: Any = None
+        self._last_distance_m = 0.0
+        self._decisions = 0
+        self._overrides = 0
+        self._mode_counts: dict[str, int] = {}
+
+    def _annotate(
+        self,
+        info: dict[str, Any],
+        *,
+        proposed_action: int = 4,
+        selected_action: int = 4,
+        mode: str = "explore",
+        overrode: bool = False,
+        target_visible: bool = False,
+        target_viable: bool = False,
+        target_range_m: Optional[float] = None,
+        available_range_m: float = 0.0,
+    ) -> None:
+        info["mission_supervisor"] = True
+        info["supervisor_policy_action"] = proposed_action
+        info["supervisor_action"] = selected_action
+        info["supervisor_mode"] = mode
+        info["supervisor_overrode"] = overrode
+        info["supervisor_target_visible"] = target_visible
+        info["supervisor_target_viable"] = target_viable
+        info["supervisor_target_range_m"] = target_range_m
+        info["supervisor_available_range_m"] = available_range_m
+        info["supervisor_decisions"] = self._decisions
+        info["supervisor_overrides"] = self._overrides
+        info["supervisor_override_rate"] = (
+            self._overrides / self._decisions if self._decisions else 0.0
+        )
+        for name in (
+            "explore",
+            "intercept",
+            "commit",
+            "preserve",
+            "stabilize",
+            "beacon_deploy",
+            "beacon_hold",
+        ):
+            info[f"supervisor_{name}_steps"] = self._mode_counts.get(name, 0)
+
+    def reset(
+        self,
+        *,
+        seed: Optional[int] = None,
+        options: Optional[dict[str, Any]] = None,
+    ) -> tuple[Any, dict[str, Any]]:
+        obs, info = self.env.reset(seed=seed, options=options)
+        self._supervisor.reset()
+        self._last_obs = obs
+        self._last_distance_m = float(info.get("reward_distance", 0.0))
+        self._decisions = 0
+        self._overrides = 0
+        self._mode_counts = {}
+        self._annotate(info)
+        return obs, info
+
+    def step(self, action: int) -> tuple[Any, float, bool, bool, dict[str, Any]]:
+        if self._last_obs is None:
+            raise RuntimeError("MissionSupervisorWrapper.step() called before reset()")
+        proposed_action = int(action)
+        decision = self._supervisor.decide(
+            [float(value) for value in self._last_obs],
+            proposed_action,
+            self.power_capacity_wh,
+            self._last_distance_m,
+        )
+        (
+            selected_action,
+            mode,
+            overrode,
+            target_visible,
+            target_viable,
+            target_range_m,
+            available_range_m,
+        ) = decision
+        obs, reward, terminated, truncated, info = self.env.step(selected_action)
+        self._last_obs = obs
+        self._last_distance_m = float(
+            info.get("reward_distance", self._last_distance_m)
+        )
+        self._decisions += 1
+        self._overrides += int(overrode)
+        self._mode_counts[mode] = self._mode_counts.get(mode, 0) + 1
+        self._annotate(
+            info,
+            proposed_action=proposed_action,
+            selected_action=selected_action,
+            mode=mode,
+            overrode=overrode,
+            target_visible=target_visible,
+            target_viable=target_viable,
+            target_range_m=target_range_m,
+            available_range_m=available_range_m,
+        )
+        return obs, reward, terminated, truncated, info
+
+
 class StagedRewardWrapper(gym.Wrapper):
     """Recompute reward from cumulative info components, weighted by stage.
 
     Adds an optional one-off ``flip_penalty`` when the episode terminates
-    with the rover flipped, to discourage tipping over.
+    with the rover flipped, plus optional dense excessive-tilt shaping so
+    the policy receives a warning signal before a rollover becomes terminal.
     """
 
     def __init__(
@@ -312,6 +476,8 @@ class StagedRewardWrapper(gym.Wrapper):
         env: gym.Env,
         stage: str,
         flip_penalty: float = 50.0,
+        tilt_penalty: float = 0.0,
+        tilt_threshold_deg: float = 45.0,
         scenario: Optional[str] = None,
         cube_spawn_preset: Optional[str] = None,
         locomotion_shaping: str = "off",
@@ -328,6 +494,10 @@ class StagedRewardWrapper(gym.Wrapper):
         out_of_power_penalty: float = 75.0,
         low_power_no_target_throttle_penalty: float = 0.25,
         low_power_no_target_coast_reward: float = 0.02,
+        low_power_visible_stall_throttle_penalty: float = 0.0,
+        cube_progress_range_epsilon: float = 0.1,
+        cube_progress_bearing_epsilon_deg: float = 1.0,
+        rejected_beacon_penalty: float = 5.0,
     ) -> None:
         if stage not in STAGE_WEIGHTS:
             raise ValueError(f"unknown stage {stage!r}; choose from {STAGES}")
@@ -339,6 +509,8 @@ class StagedRewardWrapper(gym.Wrapper):
         self.stage = stage
         self._w = STAGE_WEIGHTS[stage]
         self.flip_penalty = flip_penalty
+        self.tilt_penalty = tilt_penalty
+        self.tilt_threshold_deg = tilt_threshold_deg
         self.scenario = scenario
         self.cube_spawn_preset = cube_spawn_preset
         self.locomotion_shaping = locomotion_shaping
@@ -355,6 +527,12 @@ class StagedRewardWrapper(gym.Wrapper):
         self.out_of_power_penalty = out_of_power_penalty
         self.low_power_no_target_throttle_penalty = low_power_no_target_throttle_penalty
         self.low_power_no_target_coast_reward = low_power_no_target_coast_reward
+        self.low_power_visible_stall_throttle_penalty = (
+            low_power_visible_stall_throttle_penalty
+        )
+        self.cube_progress_range_epsilon = cube_progress_range_epsilon
+        self.cube_progress_bearing_epsilon_deg = cube_progress_bearing_epsilon_deg
+        self.rejected_beacon_penalty = rejected_beacon_penalty
         # Cumulative component totals from the previous step, so we can
         # take deltas. Seeded in reset().
         self._prev = {"distance": 0.0, "cube": 0.0, "mineral": 0.0, "beacon": 0.0}
@@ -362,6 +540,12 @@ class StagedRewardWrapper(gym.Wrapper):
         self._prev_visible_range: Optional[float] = None
         self._low_power_visible_steps = 0
         self._low_power_no_target_steps = 0
+        self._low_power_visible_stall_steps = 0
+        self._low_power_visible_stall_penalty_total = 0.0
+        self._prev_guard_visible_range: Optional[float] = None
+        self._prev_guard_visible_bearing: Optional[float] = None
+        self._tilt_penalty_total = 0.0
+        self._rejected_beacon_penalty_total = 0.0
 
     @staticmethod
     def _components(info: dict[str, Any]) -> dict[str, float]:
@@ -403,7 +587,13 @@ class StagedRewardWrapper(gym.Wrapper):
         distance_delta: float,
     ) -> float:
         if (
-            self.stage not in ("locomotion", "power_idle", "power_cubes")
+            self.stage
+            not in (
+                "locomotion",
+                "power_idle",
+                "power_cubes",
+                "minerals",
+            )
             or self.locomotion_shaping == "off"
         ):
             return 0.0
@@ -428,7 +618,7 @@ class StagedRewardWrapper(gym.Wrapper):
         info: dict[str, Any],
     ) -> float:
         if (
-            self.stage not in ("power_idle", "power_cubes")
+            self.stage not in ("power_idle", "power_cubes", "minerals")
             or self.locomotion_shaping == "off"
         ):
             return 0.0
@@ -442,6 +632,80 @@ class StagedRewardWrapper(gym.Wrapper):
             return -self.low_power_no_target_throttle_penalty
         return self.low_power_no_target_coast_reward
 
+    def _low_power_visible_progress_shaping(
+        self,
+        action: int,
+        info: dict[str, Any],
+    ) -> float:
+        """Discourage draining power while a visible cube is not improving."""
+        if (
+            self.stage not in ("power_cubes", "minerals")
+            or self.locomotion_shaping == "off"
+            or self.low_power_visible_stall_throttle_penalty <= 0.0
+        ):
+            return 0.0
+
+        power_frac = float(info.get("power_frac", self._prev_power_frac))
+        nearest_raw = info.get("nearest_visible_cube_range")
+        bearing_raw = info.get("nearest_visible_cube_bearing")
+        if (
+            power_frac > self.low_power_threshold
+            or not self._has_visible_cube(info)
+            or nearest_raw is None
+            or bearing_raw is None
+        ):
+            self._prev_guard_visible_range = None
+            self._prev_guard_visible_bearing = None
+            return 0.0
+
+        nearest = float(nearest_raw)
+        bearing = abs(float(bearing_raw))
+        prev_range = self._prev_guard_visible_range
+        prev_bearing = self._prev_guard_visible_bearing
+        self._prev_guard_visible_range = nearest
+        self._prev_guard_visible_bearing = bearing
+
+        # The first visible decision establishes a baseline. Thereafter a
+        # motor action is allowed if it either closes range or turns the cube
+        # closer to boresight; this leaves deliberate intercept turns intact.
+        if (
+            prev_range is None
+            or prev_bearing is None
+            or not self._is_motor_action(action)
+        ):
+            return 0.0
+        range_improved = nearest <= prev_range - self.cube_progress_range_epsilon
+        bearing_improved = (
+            bearing <= prev_bearing - self.cube_progress_bearing_epsilon_deg
+        )
+        if range_improved or bearing_improved:
+            return 0.0
+
+        self._low_power_visible_stall_steps += 1
+        penalty = self.low_power_visible_stall_throttle_penalty
+        self._low_power_visible_stall_penalty_total += penalty
+        return -penalty
+
+    def _tilt_shaping(self, obs: Any) -> float:
+        """Penalize only large pitch/roll excursions before they become flips."""
+        if self.tilt_penalty <= 0.0:
+            return 0.0
+
+        # Observation layout starts with speed, heading, pitch, roll.
+        max_tilt = max(abs(float(obs[2])), abs(float(obs[3])))
+        excess = max(0.0, max_tilt - self.tilt_threshold_deg)
+        if excess <= 0.0:
+            return 0.0
+
+        # The terminal flip threshold is 100 degrees. Squaring the normalized
+        # excess leaves ordinary rough-terrain motion alone while making the
+        # signal rise sharply as a rollover develops.
+        span = max(1.0, 100.0 - self.tilt_threshold_deg)
+        normalized_excess = min(1.0, excess / span)
+        penalty = self.tilt_penalty * normalized_excess**2
+        self._tilt_penalty_total += penalty
+        return -penalty
+
     def _cube_approach_shaping(
         self,
         info: dict[str, Any],
@@ -450,7 +714,7 @@ class StagedRewardWrapper(gym.Wrapper):
         cube_delta: float,
     ) -> float:
         if (
-            self.stage not in ("cube_intercept", "power_cubes")
+            self.stage not in ("cube_intercept", "power_cubes", "minerals")
             or self.cube_shaping == "off"
         ):
             return 0.0
@@ -523,7 +787,15 @@ class StagedRewardWrapper(gym.Wrapper):
         self._prev_visible_range = None
         self._low_power_visible_steps = 0
         self._low_power_no_target_steps = 0
+        self._low_power_visible_stall_steps = 0
+        self._low_power_visible_stall_penalty_total = 0.0
+        self._prev_guard_visible_range = None
+        self._prev_guard_visible_bearing = None
+        self._tilt_penalty_total = 0.0
+        self._rejected_beacon_penalty_total = 0.0
         self._annotate_info(info)
+        info["tilt_penalty_total"] = self._tilt_penalty_total
+        info["rejected_beacon_penalty_total"] = self._rejected_beacon_penalty_total
         return obs, info
 
     def step(self, action: int) -> tuple[Any, float, bool, bool, dict[str, Any]]:
@@ -544,9 +816,14 @@ class StagedRewardWrapper(gym.Wrapper):
             int(action), info, terminated, deltas["distance"]
         )
         shaped += self._low_power_no_target_shaping(int(action), info)
+        shaped += self._low_power_visible_progress_shaping(int(action), info)
+        shaped += self._tilt_shaping(obs)
         shaped += self._cube_approach_shaping(
             info, terminated, truncated, deltas["cube"]
         )
+        if info.get("supervisor_mode") == "beacon_hold":
+            shaped -= self.rejected_beacon_penalty
+            self._rejected_beacon_penalty_total += self.rejected_beacon_penalty
         self._prev = cur
         self._prev_power_frac = float(info.get("power_frac", self._prev_power_frac))
 
@@ -563,6 +840,12 @@ class StagedRewardWrapper(gym.Wrapper):
         self._annotate_info(info)
         info["low_power_visible_steps"] = self._low_power_visible_steps
         info["low_power_no_target_steps"] = self._low_power_no_target_steps
+        info["low_power_visible_stall_steps"] = self._low_power_visible_stall_steps
+        info["low_power_visible_stall_penalty_total"] = (
+            self._low_power_visible_stall_penalty_total
+        )
+        info["tilt_penalty_total"] = self._tilt_penalty_total
+        info["rejected_beacon_penalty_total"] = self._rejected_beacon_penalty_total
         return obs, float(shaped), terminated, truncated, info
 
 
@@ -594,6 +877,21 @@ def make_staged_env(
     seed: int = 42,
     max_steps: int = 2000,
     flip_penalty: float = 50.0,
+    tilt_penalty: float = 0.0,
+    tilt_threshold_deg: float = 45.0,
+    mission_supervisor: bool = False,
+    supervisor_low_power_enter_fraction: float = 0.35,
+    supervisor_low_power_exit_fraction: float = 0.50,
+    supervisor_path_safety_factor: float = 1.10,
+    supervisor_reserve_distance_m: float = 2.0,
+    supervisor_tilt_enter_deg: float = 20.0,
+    supervisor_tilt_exit_deg: float = 18.0,
+    supervisor_tilt_guard_min_speed_mps: float = 1.0,
+    supervisor_target_loss_grace_decisions: int = 0,
+    supervisor_beacon_first_distance_m: float = 100.0,
+    supervisor_beacon_spacing_m: float = 75.0,
+    supervisor_beacon_auto_deploy: bool = True,
+    supervisor_beacon_surface_score_threshold: float = 150.0,
     frame_skip: int = 1,
     power_capacity: Optional[float] = None,
     power_start_fraction: Optional[float] = None,
@@ -615,6 +913,9 @@ def make_staged_env(
     locomotion_out_of_power_penalty: float = 75.0,
     low_power_no_target_throttle_penalty: float = 0.25,
     low_power_no_target_coast_reward: float = 0.02,
+    low_power_visible_stall_throttle_penalty: float = 0.0,
+    cube_progress_range_epsilon: float = 0.1,
+    cube_progress_bearing_epsilon_deg: float = 1.0,
     cube_shaping: Optional[str] = None,
     low_power_threshold: float = 0.45,
     cube_approach_reward: float = 0.25,
@@ -622,6 +923,7 @@ def make_staged_env(
     ignored_cube_penalty: float = 25.0,
     loss_of_sight_penalty: float = 5.0,
     intercept_failure_penalty: float = 50.0,
+    rejected_beacon_penalty: float = 5.0,
 ) -> gym.Env:
     """Construct a `RoverEnv` configured for `stage` and wrap its reward.
 
@@ -632,8 +934,9 @@ def make_staged_env(
     `frame_skip` > 1 holds each action for that many physics ticks
     (`ActionRepeat`). The same value must be used at training, eval, and
     in-game-autopilot time so the policy acts at the cadence it learned.
-    Wrapping order is RoverEnv → ActionRepeat → StagedRewardWrapper, so
-    the staged reward's per-step delta naturally spans all skipped ticks.
+    Wrapping order is RoverEnv → ActionRepeat → optional MissionSupervisor
+    → StagedRewardWrapper. The supervisor therefore runs once per policy
+    decision and its selected action is held across all skipped ticks.
 
     `power_capacity` (Wh) defaults to `DEFAULT_POWER_CAPACITY_WH` so the
     battery binds within an episode; pass a larger value (e.g. 1000 for
@@ -701,10 +1004,30 @@ def make_staged_env(
     )
     if frame_skip > 1:
         env = ActionRepeat(env, frame_skip)
+    if mission_supervisor:
+        env = MissionSupervisorWrapper(
+            env,
+            power_capacity_wh=power_capacity,
+            low_power_enter_fraction=supervisor_low_power_enter_fraction,
+            low_power_exit_fraction=supervisor_low_power_exit_fraction,
+            path_safety_factor=supervisor_path_safety_factor,
+            reserve_distance_m=supervisor_reserve_distance_m,
+            tilt_enter_deg=supervisor_tilt_enter_deg,
+            tilt_exit_deg=supervisor_tilt_exit_deg,
+            tilt_guard_min_speed_mps=supervisor_tilt_guard_min_speed_mps,
+            target_loss_grace_decisions=supervisor_target_loss_grace_decisions,
+            beacon_guard_enabled=(stage == "full"),
+            beacon_first_distance_m=supervisor_beacon_first_distance_m,
+            beacon_spacing_m=supervisor_beacon_spacing_m,
+            beacon_auto_deploy=supervisor_beacon_auto_deploy,
+            beacon_surface_score_threshold=(supervisor_beacon_surface_score_threshold),
+        )
     return StagedRewardWrapper(
         env,
         stage=stage,
         flip_penalty=flip_penalty,
+        tilt_penalty=tilt_penalty,
+        tilt_threshold_deg=tilt_threshold_deg,
         scenario=scenario,
         cube_spawn_preset=cube_spawn_preset,
         locomotion_shaping=locomotion_shaping,
@@ -714,6 +1037,11 @@ def make_staged_env(
         out_of_power_penalty=locomotion_out_of_power_penalty,
         low_power_no_target_throttle_penalty=low_power_no_target_throttle_penalty,
         low_power_no_target_coast_reward=low_power_no_target_coast_reward,
+        low_power_visible_stall_throttle_penalty=(
+            low_power_visible_stall_throttle_penalty
+        ),
+        cube_progress_range_epsilon=cube_progress_range_epsilon,
+        cube_progress_bearing_epsilon_deg=cube_progress_bearing_epsilon_deg,
         cube_shaping=cube_shaping,
         low_power_threshold=low_power_threshold,
         cube_approach_reward=cube_approach_reward,
@@ -721,4 +1049,5 @@ def make_staged_env(
         ignored_cube_penalty=ignored_cube_penalty,
         loss_of_sight_penalty=loss_of_sight_penalty,
         intercept_failure_penalty=intercept_failure_penalty,
+        rejected_beacon_penalty=rejected_beacon_penalty,
     )

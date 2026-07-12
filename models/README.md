@@ -32,6 +32,21 @@ git add ../models/locomotion && git commit -m "Promote locomotion model"
 `promote_model.py` copies the chosen `model.zip` + `vecnorm.pkl` here and
 regenerates `model.onnx` + `model.norm.json` from them.
 
+Hierarchical mineral/full candidates must also pass `--mission-supervisor`.
+That requirement is written into `model.norm.json`, and the game enables the
+shared controller automatically when loading the promoted ONNX bundle. The
+sidecar also keeps beacon behavior stage-correct: disabled for `minerals`,
+enabled for `full`.
+
+```bash
+python examples/promote_model.py \
+  --stage minerals --run runs/stage2_minerals_explore_ppo_v3 \
+  --source best --frame-skip 4 --mission-supervisor
+python examples/promote_model.py \
+  --stage full --run runs/stage2_minerals_explore_ppo_v3 \
+  --source best --frame-skip 4 --mission-supervisor
+```
+
 Do not promote `models/power_cubes/` until the Stage 1 gates in
 [`../docs/rl_stage0_stage1_hardening_plan.md`](../docs/rl_stage0_stage1_hardening_plan.md)
 pass. That means the policy must beat the promoted locomotion policy on
@@ -63,8 +78,11 @@ python examples/evaluate.py --stage locomotion \
 Watch it in the game:
 
 ```bash
-cargo run -p hylaeanrover_game --release -- --policy models/locomotion/model.onnx
+cargo run -p hylaeanrover_game --release -- --policy models/full/model.onnx
 ```
+
+Promoted bundles that record `mission_supervisor: true` do not require a
+separate CLI flag. `--mission-supervisor` remains available for older exports.
 
 ## Note on portability
 

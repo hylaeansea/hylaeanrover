@@ -38,12 +38,22 @@ from stable_baselines3.common.callbacks import (
     CheckpointCallback,
     EvalCallback,
 )
+from stable_baselines3.common.evaluation import evaluate_policy
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.running_mean_std import RunningMeanStd
-from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize
+from stable_baselines3.common.vec_env import (
+    DummyVecEnv,
+    SubprocVecEnv,
+    VecNormalize,
+    sync_envs_normalization,
+)
 
 import hylaeanrover
-from hylaeanrover.teacher import CubeInterceptTeacher, PowerIdleTeacher
+from hylaeanrover.teacher import (
+    CubeInterceptTeacher,
+    MineralExploreTeacher,
+    PowerIdleTeacher,
+)
 from hylaeanrover.wrappers import (
     CUBE_SHAPING_MODES,
     CUBE_SPAWN_PRESETS,
@@ -93,6 +103,164 @@ class SaveBestVecNormalize(BaseCallback):
             os.makedirs(os.path.dirname(self.save_path), exist_ok=True)
             vn.save(self.save_path)
         return True
+
+
+class SafetyEvalCallback(EvalCallback):
+    """Select checkpoints with a robust reward statistic and failure cost.
+
+    Mineral returns are heavy-tailed: a single rare hotspot can dominate a
+    small evaluation mean and save an unsafe policy. This callback keeps the
+    standard SB3 evaluation logs, but optionally ranks checkpoints by median
+    return minus a cost for out-of-power and flipped episodes.
+    """
+
+    _FAILURE_REASONS = ("out_of_power", "flipped")
+
+    def __init__(
+        self,
+        eval_env,
+        *,
+        best_model_save_path: str,
+        best_vecnorm_path: str,
+        selection_stat: str = "mean",
+        failure_penalty: float = 0.0,
+        primary_selection_name: str = "primary",
+        additional_selection_envs: list[tuple[str, object]] | None = None,
+        **kwargs,
+    ) -> None:
+        super().__init__(
+            eval_env,
+            best_model_save_path=None,
+            callback_on_new_best=None,
+            **kwargs,
+        )
+        self.selection_model_path = best_model_save_path
+        self.selection_vecnorm_path = best_vecnorm_path
+        self.selection_stat = selection_stat
+        self.failure_penalty = failure_penalty
+        self.primary_selection_name = primary_selection_name
+        self.additional_selection_envs = additional_selection_envs or []
+        self.best_selection_score = -np.inf
+        self._evaluation_reasons: list[str] = []
+
+    @staticmethod
+    def selection_score(
+        rewards: list[float],
+        failure_count: int,
+        selection_stat: str,
+        failure_penalty: float,
+    ) -> tuple[float, float, float]:
+        values = np.asarray(rewards, dtype=np.float64)
+        reward_stat = float(
+            np.median(values) if selection_stat == "median" else np.mean(values)
+        )
+        failure_rate = failure_count / max(1, len(values))
+        return reward_stat - failure_penalty * failure_rate, reward_stat, failure_rate
+
+    @staticmethod
+    def composite_selection_score(scores: dict[str, float]) -> float:
+        """Require every selected scenario to clear the same safety bar."""
+        if not scores:
+            raise ValueError("checkpoint selection needs at least one scenario")
+        return min(scores.values())
+
+    def _log_success_callback(self, locals_: dict, globals_: dict) -> None:
+        super()._log_success_callback(locals_, globals_)
+        if locals_.get("done"):
+            info = locals_.get("info", {})
+            reason = info.get("game_over")
+            if reason is None and info.get("TimeLimit.truncated", False):
+                reason = "time_limit"
+            self._evaluation_reasons.append(reason or "other")
+
+    def _on_step(self) -> bool:
+        evaluating = self.eval_freq > 0 and self.n_calls % self.eval_freq == 0
+        if evaluating:
+            self._evaluation_reasons = []
+
+        continue_training = super()._on_step()
+        if not evaluating:
+            return continue_training
+
+        primary_rewards = [float(value) for value in self.evaluations_results[-1]]
+        primary_reasons = self._evaluation_reasons.copy()
+        failure_count = sum(
+            reason in self._FAILURE_REASONS for reason in self._evaluation_reasons
+        )
+        score, reward_stat, failure_rate = self.selection_score(
+            primary_rewards,
+            failure_count,
+            self.selection_stat,
+            self.failure_penalty,
+        )
+        scenario_scores = {self.primary_selection_name: score}
+        scenario_metrics = {
+            self.primary_selection_name: (reward_stat, failure_rate, score)
+        }
+
+        for name, env in self.additional_selection_envs:
+            if self.model.get_vec_normalize_env() is not None:
+                sync_envs_normalization(self.training_env, env)
+            self._evaluation_reasons = []
+            rewards, _lengths = evaluate_policy(
+                self.model,
+                env,
+                n_eval_episodes=self.n_eval_episodes,
+                render=False,
+                deterministic=self.deterministic,
+                return_episode_rewards=True,
+                warn=self.warn,
+                callback=self._log_success_callback,
+            )
+            failures = sum(
+                reason in self._FAILURE_REASONS for reason in self._evaluation_reasons
+            )
+            scenario_score, scenario_stat, scenario_failure_rate = self.selection_score(
+                [float(value) for value in rewards],
+                failures,
+                self.selection_stat,
+                self.failure_penalty,
+            )
+            scenario_scores[name] = scenario_score
+            scenario_metrics[name] = (
+                scenario_stat,
+                scenario_failure_rate,
+                scenario_score,
+            )
+
+        self._evaluation_reasons = primary_reasons
+        score = self.composite_selection_score(scenario_scores)
+        self.logger.record("eval/selection_score", score)
+        for name, (
+            scenario_stat,
+            scenario_failure_rate,
+            scenario_score,
+        ) in scenario_metrics.items():
+            self.logger.record(f"eval_selection/{name}_reward_stat", scenario_stat)
+            self.logger.record(
+                f"eval_selection/{name}_failure_rate", scenario_failure_rate
+            )
+            self.logger.record(f"eval_selection/{name}_score", scenario_score)
+        print(
+            "Checkpoint selection: "
+            + ", ".join(
+                f"{name} {self.selection_stat}={stat:.2f} "
+                f"failure_rate={rate:.2%} score={scenario_score:.2f}"
+                for name, (stat, rate, scenario_score) in scenario_metrics.items()
+            )
+            + f"; composite={score:.2f}"
+        )
+
+        if score > self.best_selection_score:
+            os.makedirs(self.selection_model_path, exist_ok=True)
+            self.model.save(os.path.join(self.selection_model_path, "best_model"))
+            vn = self.model.get_vec_normalize_env()
+            if vn is not None:
+                os.makedirs(os.path.dirname(self.selection_vecnorm_path), exist_ok=True)
+                vn.save(self.selection_vecnorm_path)
+            self.best_selection_score = score
+            print("New best safety-adjusted checkpoint!")
+        return continue_training
 
 
 class EpisodeOutcomeCallback(BaseCallback):
@@ -233,6 +401,7 @@ def _env_kwargs_from_args(
         "cube_intercept",
         "power_idle",
         "power_cubes",
+        "minerals",
     ):
         terrain_height = "mixed_1_2"
     cube_shaping_override = None if args.cube_shaping == "auto" else args.cube_shaping
@@ -240,7 +409,7 @@ def _env_kwargs_from_args(
     if locomotion_shaping == "auto":
         locomotion_shaping = (
             "power_efficiency"
-            if args.stage in ("locomotion", "power_idle", "power_cubes")
+            if args.stage in ("locomotion", "power_idle", "power_cubes", "minerals")
             else "off"
         )
     cfg = apply_scenario_defaults(
@@ -263,6 +432,31 @@ def _env_kwargs_from_args(
     cfg["terrain_height_scale"] = terrain_scale
     cfg["terrain_height_scale_range"] = terrain_range
     cfg["cube_spawn_seed"] = args.cube_spawn_seed
+    cfg["flip_penalty"] = args.flip_penalty
+    cfg["tilt_penalty"] = args.tilt_penalty
+    cfg["tilt_threshold_deg"] = args.tilt_threshold_deg
+    cfg["mission_supervisor"] = args.mission_supervisor
+    cfg["supervisor_low_power_enter_fraction"] = (
+        args.supervisor_low_power_enter_fraction
+    )
+    cfg["supervisor_low_power_exit_fraction"] = args.supervisor_low_power_exit_fraction
+    cfg["supervisor_path_safety_factor"] = args.supervisor_path_safety_factor
+    cfg["supervisor_reserve_distance_m"] = args.supervisor_reserve_distance_m
+    cfg["supervisor_tilt_enter_deg"] = args.supervisor_tilt_enter_deg
+    cfg["supervisor_tilt_exit_deg"] = args.supervisor_tilt_exit_deg
+    cfg["supervisor_tilt_guard_min_speed_mps"] = (
+        args.supervisor_tilt_guard_min_speed_mps
+    )
+    cfg["supervisor_target_loss_grace_decisions"] = (
+        args.supervisor_target_loss_grace_decisions
+    )
+    cfg["supervisor_beacon_first_distance_m"] = args.supervisor_beacon_first_distance_m
+    cfg["supervisor_beacon_spacing_m"] = args.supervisor_beacon_spacing_m
+    cfg["supervisor_beacon_auto_deploy"] = args.supervisor_beacon_auto_deploy
+    cfg["supervisor_beacon_surface_score_threshold"] = (
+        args.supervisor_beacon_surface_score_threshold
+    )
+    cfg["rejected_beacon_penalty"] = args.rejected_beacon_penalty
     cfg["locomotion_shaping"] = locomotion_shaping
     cfg["locomotion_coast_bonus"] = args.locomotion_coast_bonus
     cfg["locomotion_power_draw_penalty"] = args.locomotion_power_draw_penalty
@@ -272,6 +466,11 @@ def _env_kwargs_from_args(
         args.low_power_no_target_throttle_penalty
     )
     cfg["low_power_no_target_coast_reward"] = args.low_power_no_target_coast_reward
+    cfg["low_power_visible_stall_throttle_penalty"] = (
+        args.low_power_visible_stall_throttle_penalty
+    )
+    cfg["cube_progress_range_epsilon"] = args.cube_progress_range_epsilon
+    cfg["cube_progress_bearing_epsilon_deg"] = args.cube_progress_bearing_epsilon_deg
     cfg["low_power_threshold"] = args.low_power_threshold
     cfg["cube_approach_reward"] = args.cube_approach_reward
     cfg["cube_heading_reward"] = args.cube_heading_reward
@@ -338,10 +537,12 @@ def _collect_teacher_dataset(
         teacher = CubeInterceptTeacher()
     elif args.stage == "power_idle":
         teacher = PowerIdleTeacher(low_power_threshold=args.low_power_threshold)
+    elif args.stage == "minerals":
+        teacher = MineralExploreTeacher(low_power_threshold=args.low_power_threshold)
     else:
         raise SystemExit(
             "--teacher-pretrain-samples is currently supported only for "
-            "cube_intercept and power_idle"
+            "cube_intercept, power_idle, and minerals"
         )
     obs_buf: list[np.ndarray] = []
     action_buf: list[int] = []
@@ -380,6 +581,8 @@ def _teacher_scenarios(args: argparse.Namespace) -> list[str]:
         return [args.teacher_scenario]
     if args.stage == "power_idle":
         return ["power_idle"]
+    if args.stage == "minerals":
+        return ["minerals_explore"]
     return ["cube_intercept"]
 
 
@@ -444,10 +647,10 @@ def _policy_accuracy(
 def _teacher_pretrain(model: PPO, args: argparse.Namespace) -> None:
     if args.teacher_pretrain_samples <= 0:
         return
-    if args.stage not in ("cube_intercept", "power_idle"):
+    if args.stage not in ("cube_intercept", "power_idle", "minerals"):
         raise SystemExit(
             "--teacher-pretrain-samples is currently only for cube_intercept "
-            "and power_idle"
+            "power_idle, and minerals"
         )
     obs, actions, stats = _collect_teacher_dataset_for_scenarios(args)
     if (
@@ -631,9 +834,7 @@ def main() -> None:
         "--cube-shaping",
         choices=("auto",) + CUBE_SHAPING_MODES,
         default="auto",
-        help=(
-            "Stage 1 cube approach shaping; auto enables low_power for " "power_cubes"
-        ),
+        help=("Cube approach shaping; auto enables low_power for power_cubes"),
     )
     p.add_argument(
         "--low-power-threshold",
@@ -677,9 +878,54 @@ def main() -> None:
         default="auto",
         help=(
             "Power pacing shaping; auto enables power_efficiency for "
-            "locomotion, power_idle, and power_cubes"
+            "locomotion, power_idle, power_cubes, and minerals"
         ),
     )
+    p.add_argument(
+        "--flip-penalty",
+        type=float,
+        default=50.0,
+        help="terminal penalty when the rover flips",
+    )
+    p.add_argument(
+        "--tilt-penalty",
+        type=float,
+        default=0.0,
+        help=(
+            "dense maximum penalty per decision as pitch/roll approaches "
+            "the 100-degree flip threshold"
+        ),
+    )
+    p.add_argument(
+        "--tilt-threshold-deg",
+        type=float,
+        default=45.0,
+        help="pitch/roll magnitude where dense tilt shaping begins",
+    )
+    p.add_argument(
+        "--mission-supervisor",
+        action="store_true",
+        help="apply the shared reachability/intercept/tilt supervisor",
+    )
+    p.add_argument("--supervisor-low-power-enter-fraction", type=float, default=0.35)
+    p.add_argument("--supervisor-low-power-exit-fraction", type=float, default=0.50)
+    p.add_argument("--supervisor-path-safety-factor", type=float, default=1.10)
+    p.add_argument("--supervisor-reserve-distance-m", type=float, default=2.0)
+    p.add_argument("--supervisor-tilt-enter-deg", type=float, default=20.0)
+    p.add_argument("--supervisor-tilt-exit-deg", type=float, default=18.0)
+    p.add_argument("--supervisor-tilt-guard-min-speed-mps", type=float, default=1.0)
+    p.add_argument("--supervisor-target-loss-grace-decisions", type=int, default=0)
+    p.add_argument("--supervisor-beacon-first-distance-m", type=float, default=100.0)
+    p.add_argument("--supervisor-beacon-spacing-m", type=float, default=75.0)
+    p.add_argument(
+        "--supervisor-beacon-auto-deploy",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    p.add_argument(
+        "--supervisor-beacon-surface-score-threshold", type=float, default=150.0
+    )
+    p.add_argument("--rejected-beacon-penalty", type=float, default=5.0)
     p.add_argument(
         "--locomotion-coast-bonus",
         type=float,
@@ -721,6 +967,27 @@ def main() -> None:
             "small per-decision reward for coast/no-op actions when power is "
             "low and no actionable cube is visible"
         ),
+    )
+    p.add_argument(
+        "--low-power-visible-stall-throttle-penalty",
+        type=float,
+        default=0.0,
+        help=(
+            "extra penalty for a low-power motor action when the nearest "
+            "visible cube neither closes nor becomes better aligned"
+        ),
+    )
+    p.add_argument(
+        "--cube-progress-range-epsilon",
+        type=float,
+        default=0.1,
+        help="minimum visible-cube range reduction that counts as progress",
+    )
+    p.add_argument(
+        "--cube-progress-bearing-epsilon-deg",
+        type=float,
+        default=1.0,
+        help="minimum visible-cube bearing reduction that counts as progress",
     )
     # PPO stability knobs. Defaults reproduce SB3's stock behavior, so the
     # run is unchanged unless these are passed. They exist to fight the
@@ -770,6 +1037,30 @@ def main() -> None:
         help="early-stop a rollout's epochs once approx_kl exceeds this (e.g. 0.02)",
     )
     p.add_argument(
+        "--eval-selection-stat",
+        choices=("mean", "median"),
+        default="mean",
+        help="episode-return statistic used to select the primary best checkpoint",
+    )
+    p.add_argument(
+        "--eval-failure-penalty",
+        type=float,
+        default=0.0,
+        help=(
+            "checkpoint-selection cost multiplied by the primary eval's "
+            "out-of-power plus flip rate"
+        ),
+    )
+    p.add_argument(
+        "--selection-extra-scenarios",
+        type=str,
+        default="",
+        help=(
+            "comma-separated scenarios that must also pass the primary "
+            "checkpoint-selection score"
+        ),
+    )
+    p.add_argument(
         "--power-capacity",
         type=float,
         default=DEFAULT_POWER_CAPACITY_WH,
@@ -784,7 +1075,7 @@ def main() -> None:
         default=0,
         help=(
             "collect this many teacher observations before PPO "
-            "(cube_intercept or power_idle)"
+            "(cube_intercept, power_idle, or minerals)"
         ),
     )
     p.add_argument(
@@ -911,6 +1202,31 @@ def main() -> None:
         norm_reward=False,
         training=False,
     )
+    selection_extra_scenarios = _parse_scenario_list(args.selection_extra_scenarios)
+    if args.scenario in selection_extra_scenarios:
+        raise SystemExit("--selection-extra-scenarios must not repeat --scenario")
+    selection_extra_envs = []
+    for index, scenario in enumerate(selection_extra_scenarios):
+        extra_kwargs = _env_kwargs_from_args(args, scenario=scenario)
+        selection_extra_envs.append(
+            (
+                scenario,
+                VecNormalize(
+                    _make_vec_env(
+                        args.stage,
+                        args.seed + 1_500 + index,
+                        args.max_steps,
+                        args.frame_skip,
+                        1,
+                        args.power_capacity,
+                        extra_kwargs,
+                    ),
+                    norm_obs=True,
+                    norm_reward=False,
+                    training=False,
+                ),
+            )
+        )
 
     # --- Model: warm-start or fresh ---------------------------------------
     tb_dir = os.path.join(args.save, "tb")
@@ -967,18 +1283,18 @@ def main() -> None:
             save_path=os.path.join(args.save, "checkpoints"),
             name_prefix=f"ppo_{args.stage}",
         ),
-        EvalCallback(
+        SafetyEvalCallback(
             eval_venv,
             best_model_save_path=os.path.join(args.save, "best"),
+            best_vecnorm_path=os.path.join(args.save, "best", "vecnorm.pkl"),
             log_path=os.path.join(args.save, "eval"),
             eval_freq=args.eval_freq,
             n_eval_episodes=args.n_eval_episodes,
             deterministic=True,
-            # Save matching obs-normalization stats next to best_model.zip
-            # so the best checkpoint is a complete, loadable bundle.
-            callback_on_new_best=SaveBestVecNormalize(
-                os.path.join(args.save, "best", "vecnorm.pkl")
-            ),
+            selection_stat=args.eval_selection_stat,
+            failure_penalty=args.eval_failure_penalty,
+            primary_selection_name=args.scenario or "primary",
+            additional_selection_envs=selection_extra_envs,
         ),
     ]
 

@@ -717,25 +717,66 @@ for scenario in transition sparse_game; do
 done
 ```
 
-## 15. Train Stage 2: Minerals
+## 15. Bootstrap Stage 2 Exploration
 
-Warm-start from the accepted power-cube model.
+Warm-start from the accepted power-cube model and add the missing
+exploration motor prior before PPO. The mineral observation is local
+concentration, not a directional gradient, so this teacher simply drives
+while power is healthy, coasts during low-power recovery, and preserves
+visible-cube interception only as a survival behavior.
+
+```bash
+python examples/train.py \
+  --stage minerals \
+  --timesteps 0 \
+  --load ../models/power_cubes/model.zip \
+  --vecnorm ../models/power_cubes/vecnorm.pkl \
+  --reset-reward-stats \
+  --save runs/stage2_minerals_bc \
+  --seed "$SEED" \
+  --n-envs 1 \
+  --frame-skip "$FRAME_SKIP" \
+  --power-capacity "$POWER_CAPACITY" \
+  --horizon short \
+  --scenario minerals_explore \
+  --low-power-threshold 0.35 \
+  --teacher-pretrain-samples 75000 \
+  --teacher-pretrain-epochs 5 \
+  --teacher-pretrain-batch-size 512 \
+  --teacher-pretrain-learning-rate 0.0003 \
+  --teacher-scenarios minerals_explore,minerals_sparse,minerals_transition,transition,no_cube_control \
+  --teacher-pretrain-only
+```
+
+## 16. Train Stage 2: Minerals
+
+Warm-start from the exploration-prior checkpoint.
 
 ```bash
 python examples/train.py \
   --stage minerals \
   --timesteps "$STAGE2_STEPS" \
-  --load ../models/power_cubes/model.zip \
-  --vecnorm ../models/power_cubes/vecnorm.pkl \
+  --load runs/stage2_minerals_bc/model.zip \
+  --vecnorm runs/stage2_minerals_bc/vecnorm.pkl \
   --reset-reward-stats \
   --save runs/stage2_minerals \
   --seed "$SEED" \
   --n-envs "$N_ENVS" \
   --frame-skip "$FRAME_SKIP" \
   --power-capacity "$POWER_CAPACITY" \
-  --horizon short \
-  --scenario terrain_mixed_1_2 \
-  --extra-eval-scenarios transition,sparse_game,terrain_fixed_1_0,terrain_fixed_2_0 \
+  --horizon medium \
+  --scenario minerals_sparse \
+  --low-power-threshold 0.35 \
+  --locomotion-out-of-power-penalty 1500 \
+  --flip-penalty 1500 \
+  --tilt-penalty 5 \
+  --tilt-threshold-deg 45 \
+  --eval-selection-stat median \
+  --eval-failure-penalty 10000 \
+  --selection-extra-scenarios transition \
+  --ignored-cube-penalty 500 \
+  --train-scenarios minerals_explore,minerals_sparse,minerals_sparse,minerals_transition,minerals_transition,minerals_fixed_2_sparse,no_cube_control,no_cube_control,cube_intercept_low_power \
+  --extra-eval-scenarios minerals_explore,minerals_transition,sparse_visible_low_power,sparse_game,no_cube_control,transition,terrain_fixed_1_0,terrain_fixed_2_0 \
   --eval-freq 25000 \
   --n-eval-episodes 10 \
   --checkpoint-freq 100000 \
@@ -743,10 +784,27 @@ python examples/train.py \
   --target-kl 0.02
 ```
 
-## 16. Evaluate Stage 2
+Stage 2 still has to preserve Stage 1 survival behavior. `auto`
+locomotion shaping enables the power-efficiency guard for minerals, but
+cube pickups are no longer directly rewarded in the minerals stage. The
+mixed train scenarios make no-cube and sparse-cube mineral exploration
+the main task; low-power cube shaping keeps the Stage 1 survival skill
+available without teaching the exported rover to wait for cube drops.
+Stage 2 trains on the medium horizon because the power-exhaustion and
+rollover tail appears after the short horizon has already truncated.
+Do not use an oversized global battery-draw penalty as a generic safety
+fix. A medium-horizon trial at `1000` reduced flips but increased
+out-of-power failures in plain transition, sparse-game, and forced
+low-power evaluation. Keep the default draw cost until low-power visible
+cube progress can be shaped separately from ordinary exploration.
+The visible-cube progress guard (`--low-power-visible-stall-throttle-penalty`)
+improved forced intercepts but did not clear transition survival gates; keep
+it disabled in the canonical run until a cube-reachability signal is added.
+
+## 17. Evaluate Stage 2
 
 ```bash
-for scenario in terrain_mixed_1_2 transition sparse_game terrain_fixed_1_0 terrain_fixed_1_5 terrain_fixed_2_0; do
+for scenario in minerals_explore minerals_sparse minerals_transition transition sparse_game terrain_fixed_1_0 terrain_fixed_1_5 terrain_fixed_2_0; do
   python examples/evaluate.py \
     --stage minerals \
     --load runs/stage2_minerals/best/best_model.zip \
@@ -781,20 +839,23 @@ Stage 2 can pass when:
 
 - mineral mean beats the Stage 2 power-cube baseline;
 - cube pickups and end power do not regress badly;
+- `sparse_visible_low_power`, `sparse_game`, and `no_cube_control` remain
+  within the accepted Stage 1 envelope;
 - distance and flip rate remain acceptable;
 - medium and sampled long horizons do not expose a new terminal failure.
 
-## 17. Promote Stage 2
+## 18. Promote Stage 2
 
 ```bash
 python examples/promote_model.py \
   --stage minerals \
   --run runs/stage2_minerals \
   --source best \
-  --frame-skip "$FRAME_SKIP"
+  --frame-skip "$FRAME_SKIP" \
+  --mission-supervisor
 ```
 
-## 18. Record Stage 3 Baselines
+## 19. Record Stage 3 Baselines
 
 Evaluate the promoted minerals policy under the full reward with beacons
 enabled.
@@ -813,9 +874,29 @@ python examples/evaluate.py \
   | tee runs/reports/stage3_minerals_baseline_medium.txt
 ```
 
-## 19. Train Stage 3: Full
+## 20. Train Stage 3: Full
 
 Warm-start from the accepted minerals model.
+
+First evaluate the hierarchical full-mission controller before changing PPO.
+With `--mission-supervisor`, the accepted mineral policy remains responsible
+for exploration while the shared controller automatically deploys beacons only
+after 100 m of travel, at least 75 m apart, and when the scarcity-weighted
+surface score is at least 150. This same logic runs in the game.
+
+The July 2026 direct PPO probe was rejected: it learned beacon reward but cut
+sparse mineral reward by more than half. The frozen Stage 2 policy plus the
+hierarchical controller passed instead:
+
+| Scenario | Minerals | Pickups | Beacons | Flip | Out of power |
+|---|---:|---:|---:|---:|---:|
+| `minerals_transition` | 7468 | 4.15 | 0.79 | 2% | 0% |
+| `sparse_game` | 4884 | 0.37 | 0.36 | 0% | 0% |
+
+These are matched 100-episode, medium-horizon results at seed 2000 and frame
+skip 4. Do not fine-tune the exploration policy unless a new run matches or
+beats both rows. If PPO training is still required, keep the beacon guard and
+use transition plus sparse scenarios for safety-adjusted checkpoint selection.
 
 ```bash
 python examples/train.py \
@@ -829,17 +910,25 @@ python examples/train.py \
   --n-envs "$N_ENVS" \
   --frame-skip "$FRAME_SKIP" \
   --power-capacity "$POWER_CAPACITY" \
-  --horizon short \
-  --scenario terrain_mixed_1_2 \
-  --extra-eval-scenarios transition,sparse_game,terrain_fixed_1_0,terrain_fixed_2_0 \
+  --horizon medium \
+  --scenario minerals_transition \
+  --train-scenarios minerals_transition,minerals_sparse \
+  --extra-eval-scenarios sparse_game \
+  --selection-extra-scenarios sparse_game \
+  --eval-selection-stat median \
+  --eval-failure-penalty 10000 \
   --eval-freq 25000 \
   --n-eval-episodes 10 \
   --checkpoint-freq 100000 \
   --ent-coef 0.01 \
-  --target-kl 0.02
+  --target-kl 0.02 \
+  --mission-supervisor \
+  --supervisor-beacon-first-distance-m 100 \
+  --supervisor-beacon-spacing-m 75 \
+  --supervisor-beacon-surface-score-threshold 150
 ```
 
-## 20. Evaluate Stage 3
+## 21. Evaluate Stage 3
 
 ```bash
 for scenario in terrain_mixed_1_2 transition sparse_game terrain_fixed_1_0 terrain_fixed_1_5 terrain_fixed_2_0; do
@@ -880,14 +969,15 @@ Stage 3 can pass when:
 - mineral and cube metrics do not collapse;
 - distance, power survival, and flip rate remain acceptable.
 
-## 21. Promote Stage 3
+## 22. Promote Stage 3
 
 ```bash
 python examples/promote_model.py \
   --stage full \
   --run runs/stage3_full \
   --source best \
-  --frame-skip "$FRAME_SKIP"
+  --frame-skip "$FRAME_SKIP" \
+  --mission-supervisor
 ```
 
 ## 22. Export and Watch Policies
@@ -897,7 +987,8 @@ Promotion already creates `model.onnx` and `model.norm.json` in
 
 ```bash
 cargo run -p hylaeanrover_game --release -- \
-  --policy ../models/full/model.onnx
+  --policy ../models/full/model.onnx \
+  --mission-supervisor
 ```
 
 Export an unpromoted checkpoint for inspection:
@@ -915,11 +1006,51 @@ Then:
 
 ```bash
 cargo run -p hylaeanrover_game --release -- \
-  --policy runs/stage1_power_cubes/best/best_model.onnx
+  --policy runs/stage1_power_cubes/best/best_model.onnx \
+  --mission-supervisor
 ```
 
 In the game, press `P` to toggle autopilot and `O` to reload the ONNX
 file after exporting a newer checkpoint.
+
+The mission supervisor is the deployment controller for Stage 2 and later.
+PPO explores for minerals while power and attitude are healthy. At 35% power
+it switches to a shared deterministic cube intercept when the nearest visible
+cube is reachable, or coasts to preserve reserve when no viable cube exists.
+Its kinetic tilt guard brakes above 20 degrees while speed exceeds 1 m/s and
+releases after the rover slows, so ordinary slopes do not permanently suppress
+exploration. Training and acceptance evals must pass `--mission-supervisor` so
+they exercise the same controller used by the game.
+
+```bash
+python examples/evaluate.py \
+  --stage minerals \
+  --load runs/stage2_minerals_explore_ppo_v3/best/best_model.zip \
+  --vecnorm runs/stage2_minerals_explore_ppo_v3/best/vecnorm.pkl \
+  --scenario minerals_transition \
+  --horizon medium --episodes 100 --seed 2000 --frame-skip 4 \
+  --low-power-threshold 0.35 \
+  --mission-supervisor
+```
+
+The default target-loss grace is zero. Continuing forward after a cube leaves
+the actionable sensor caused rollovers in calibration and is not permitted by
+the deployment controller.
+
+Matched 100-episode acceptance results for the `ppo_v3` Stage 2 candidate
+(seed 2000, medium horizon, frame skip 4, shaping off):
+
+| Scenario | Minerals | Pickups | Flip | Out of power |
+|---|---:|---:|---:|---:|
+| `minerals_transition` | 7805 | 3.81 | 3% | 0% |
+| `sparse_game` | 3889 | 0.31 | 0% | 0% |
+| `sparse_visible_low_power` | 3024 | 1.13 | 0% | 0% |
+
+The unsupervised matched baselines were 8775 minerals with 11% flips and 6%
+out of power on `minerals_transition`, and 4679 minerals, 0.29 pickups, and 6%
+out of power on `sparse_game`. The supervisor is therefore a deliberate small
+throughput trade for a large reduction in terminal failures, while retaining
+nonzero sparse pickups and the required forced-visible intercept behavior.
 
 ## 23. Final Verification Checklist
 

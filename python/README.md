@@ -143,11 +143,39 @@ python examples/train.py --stage power_cubes --timesteps 1000000 \
     --cube-shaping intercept \
     --save runs/stage1_power_cubes
 
-# Stage 2 — drive + minerals (warm-started from stage 1)
-python examples/train.py --stage minerals --timesteps 1000000 \
+# Stage 2A — minerals exploration prior (drive while powered, survive low-power)
+python examples/train.py --stage minerals --timesteps 0 \
     --load runs/stage1_power_cubes/model.zip \
     --vecnorm runs/stage1_power_cubes/vecnorm.pkl \
-    --reset-reward-stats --save runs/stage2
+    --reset-reward-stats \
+    --scenario minerals_explore \
+    --low-power-threshold 0.35 \
+    --teacher-pretrain-samples 75000 \
+    --teacher-pretrain-epochs 5 \
+    --teacher-pretrain-batch-size 512 \
+    --teacher-scenarios minerals_explore,minerals_sparse,minerals_transition,transition,no_cube_control \
+    --teacher-pretrain-only \
+    --save runs/stage2_minerals_bc
+
+# Stage 2B — drive + minerals (warm-started from the exploration prior)
+python examples/train.py --stage minerals --timesteps 1000000 \
+    --load runs/stage2_minerals_bc/model.zip \
+    --vecnorm runs/stage2_minerals_bc/vecnorm.pkl \
+    --reset-reward-stats \
+    --horizon medium \
+    --scenario minerals_sparse \
+    --low-power-threshold 0.35 \
+    --locomotion-out-of-power-penalty 1500 \
+    --flip-penalty 1500 \
+    --tilt-penalty 5 \
+    --tilt-threshold-deg 45 \
+    --eval-selection-stat median \
+    --eval-failure-penalty 10000 \
+    --selection-extra-scenarios transition \
+    --ignored-cube-penalty 500 \
+    --train-scenarios minerals_explore,minerals_sparse,minerals_sparse,minerals_transition,minerals_transition,minerals_fixed_2_sparse,no_cube_control,no_cube_control,cube_intercept_low_power \
+    --extra-eval-scenarios minerals_explore,minerals_transition,sparse_visible_low_power,sparse_game,no_cube_control,transition \
+    --save runs/stage2_minerals
 
 # Stage 3 — full mission incl. beacons (warm-started from stage 2)
 python examples/train.py --stage full --timesteps 1000000 \
@@ -212,22 +240,36 @@ The key scenario knobs are:
   `cube_intercept` penalties for abandoning a visible cube or timing out
   without pickup.
 - `--teacher-pretrain-samples`, `--teacher-pretrain-epochs`,
-  `--teacher-pretrain-batch-size`, and `--teacher-scenario`: optional
-  close-range teacher-assisted policy-head bootstrap for
-  `cube_intercept` and low-power idle bootstrap for `power_idle`. It is a
-  bootstrap only; promotion still depends on no-shaping eval gates and any
-  later PPO fine-tuning.
+  `--teacher-pretrain-batch-size`, `--teacher-scenario`, and
+  `--teacher-scenarios`: optional
+  teacher-assisted policy-head bootstrap for `cube_intercept`, low-power
+  idle bootstrap for `power_idle`, and mineral exploration bootstrap for
+  `minerals`. It is a bootstrap only; promotion still depends on
+  no-shaping eval gates and any later PPO fine-tuning.
 - `--locomotion-shaping`: `power_efficiency` adds pacing shaping so
   coasting/regen is learnable. `auto` enables it for `locomotion`,
-  `power_idle`, and `power_cubes`.
+  `power_idle`, `power_cubes`, and `minerals`.
 - `--locomotion-coast-bonus`, `--locomotion-power-draw-penalty`,
   `--locomotion-power-recovery-reward`, and
   `--locomotion-out-of-power-penalty`: tune Stage 0 pacing pressure when
-  the policy plateaus as an out-of-power sprint.
+  the policy plateaus as an out-of-power sprint. Stage 2 uses a larger
+  out-of-power penalty during PPO so high-mineral terminal episodes do
+  not dominate checkpoint selection.
+- `--flip-penalty`: tune the terminal penalty when the rover flips; use a
+  larger value for Stage 2 PPO when transition-density mineral runs trade
+  safety for reward.
 - `--low-power-no-target-throttle-penalty` and
   `--low-power-no-target-coast-reward`: tune the extra `power_idle` /
-  `power_cubes` pressure for low-power steps where no actionable cube is
-  visible.
+  `power_cubes` / `minerals` pressure for low-power steps where no
+  actionable cube is visible.
+- `--low-power-visible-stall-throttle-penalty`: experimental low-power
+  penalty for motor actions that neither close on nor align with a visible
+  cube. It improves forced intercepts but is not yet a transition-safe
+  Stage 2 default.
+- `--eval-selection-stat`, `--eval-failure-penalty`, and
+  `--selection-extra-scenarios`: select the saved checkpoint on robust
+  return after failure cost, using the worst score across the named
+  transition distributions.
 - `--reset-reward-stats` / `--preserve-reward-stats`: reset reward
   normalization for stage transitions, preserve it for same-stage
   continuation.
@@ -313,7 +355,8 @@ python examples/train.py --stage cube_intercept --timesteps 0 \
     --teacher-pretrain-only \
     --save runs/stage1_cube_intercept_bc
 # watch the best
-cargo run -p hylaeanrover_game --release -- --policy models/locomotion/model.onnx
+cargo run -p hylaeanrover_game --release -- \
+    --policy models/locomotion/model.onnx --mission-supervisor
 ```
 
 See [`../models/README.md`](../models/README.md) for the bundle layout.
@@ -371,6 +414,29 @@ flag is always 0 on the steps the agent acts on. The full per-component
 reward is still available in the `info` dict (see Reward, below) for
 shaping and logging. Keeping the observation shape fixed at 41 lets a
 policy trained on one curriculum stage transfer cleanly to the next.
+
+## Mission supervisor
+
+Stage 2 and later use a shared Rust mission supervisor around PPO. The policy
+owns mineral exploration while power and attitude are healthy. Below 35%
+power, the supervisor intercepts only a visible cube that the remaining energy
+can reach under the real drain model; otherwise it coasts. A speed-gated tilt
+guard brakes dangerous motion without treating a stationary slope as a
+rollover. The same state machine is exposed through `MissionSupervisorWrapper`
+for training/evaluation and through `--mission-supervisor` in the game.
+
+Enable it explicitly in Python with `--mission-supervisor`. Its decisions and
+override rate are reported through the `supervisor_*` `info` fields and the
+evaluation summary. Target-loss grace defaults to zero, so a cube leaving the
+actionable sensor does not cause blind forward throttle.
+
+In the `full` stage, the same supervisor protects beacon use. It requires
+100 m of exploration before the first placement, 75 m between placements, and
+a scarcity-weighted surface-mineral score of at least 150. The supervisor can
+therefore keep the accepted mineral-exploration policy frozen while adding
+strategic beacon placement. Early or crowded policy requests are converted to
+coast and receive a small training penalty; in-game deployment uses the same
+guard and automatic placement rule.
 
 ## Reward
 

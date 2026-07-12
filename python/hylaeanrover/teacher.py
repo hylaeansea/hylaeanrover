@@ -77,6 +77,45 @@ class PowerIdleTeacher:
         return 4
 
 
+@dataclass
+class MineralExploreTeacher:
+    """Teacher for Stage 2 exploration before PPO fine-tuning.
+
+    The mineral observation is local concentration under the rover, not a
+    directional gradient. This teacher therefore does not pretend to know
+    where deposits are. It provides the missing motor prior: cover ground
+    while power is healthy, then recover when power gets low. During
+    low-power recovery, visible cubes stay survival targets rather than
+    becoming a paid objective.
+    """
+
+    low_power_threshold: float = 0.45
+    resume_power_threshold: float = 0.65
+    intercept_teacher: CubeInterceptTeacher | None = None
+    recovering: bool = False
+
+    def __post_init__(self) -> None:
+        if self.intercept_teacher is None:
+            self.intercept_teacher = CubeInterceptTeacher()
+
+    def reset(self) -> None:
+        assert self.intercept_teacher is not None
+        self.intercept_teacher.reset()
+        self.recovering = False
+
+    def action(self, obs: np.ndarray) -> int:
+        assert self.intercept_teacher is not None
+        power_frac = float(obs[POWER_OBS_INDEX])
+        if power_frac <= self.low_power_threshold:
+            self.recovering = True
+        elif power_frac >= self.resume_power_threshold:
+            self.recovering = False
+            self.intercept_teacher.reset()
+        if self.recovering and nearest_visible_cube(obs) is not None:
+            return self.intercept_teacher.action(obs)
+        return 4 if self.recovering else 7
+
+
 def nearest_visible_cube(obs: np.ndarray) -> tuple[float, float] | None:
     """Return ``(bearing_deg, range_m)`` for the nearest valid cube slot."""
     best: tuple[float, float] | None = None
