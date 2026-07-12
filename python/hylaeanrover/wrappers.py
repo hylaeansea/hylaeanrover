@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import gymnasium as gym
+import numpy as np
 
 from hylaeanrover import MissionSupervisorCore, RoverEnv
 
@@ -332,9 +333,12 @@ class MissionSupervisorWrapper(gym.Wrapper):
         *,
         power_capacity_wh: float,
         low_power_enter_fraction: float = 0.35,
-        low_power_exit_fraction: float = 0.50,
+        low_power_exit_fraction: float = 0.40,
         path_safety_factor: float = 1.10,
         reserve_distance_m: float = 2.0,
+        max_intercept_range_m: float = 120.0,
+        recharge_detect_wh: float = 50.0,
+        post_recharge_exploration_wh: float = 75.0,
         tilt_enter_deg: float = 20.0,
         tilt_exit_deg: float = 18.0,
         tilt_guard_min_speed_mps: float = 1.0,
@@ -352,6 +356,9 @@ class MissionSupervisorWrapper(gym.Wrapper):
             low_power_exit_fraction=low_power_exit_fraction,
             path_safety_factor=path_safety_factor,
             reserve_distance_m=reserve_distance_m,
+            max_intercept_range_m=max_intercept_range_m,
+            recharge_detect_wh=recharge_detect_wh,
+            post_recharge_exploration_wh=post_recharge_exploration_wh,
             tilt_enter_deg=tilt_enter_deg,
             tilt_exit_deg=tilt_exit_deg,
             tilt_guard_min_speed_mps=tilt_guard_min_speed_mps,
@@ -420,7 +427,10 @@ class MissionSupervisorWrapper(gym.Wrapper):
         self._overrides = 0
         self._mode_counts = {}
         self._annotate(info)
-        return obs, info
+        policy_obs = self._supervisor.policy_observation(
+            [float(value) for value in obs]
+        )
+        return np.asarray(policy_obs, dtype=np.float32), info
 
     def step(self, action: int) -> tuple[Any, float, bool, bool, dict[str, Any]]:
         if self._last_obs is None:
@@ -460,7 +470,16 @@ class MissionSupervisorWrapper(gym.Wrapper):
             target_range_m=target_range_m,
             available_range_m=available_range_m,
         )
-        return obs, reward, terminated, truncated, info
+        policy_obs = self._supervisor.policy_observation(
+            [float(value) for value in obs]
+        )
+        return (
+            np.asarray(policy_obs, dtype=np.float32),
+            reward,
+            terminated,
+            truncated,
+            info,
+        )
 
 
 class StagedRewardWrapper(gym.Wrapper):
@@ -881,9 +900,12 @@ def make_staged_env(
     tilt_threshold_deg: float = 45.0,
     mission_supervisor: bool = False,
     supervisor_low_power_enter_fraction: float = 0.35,
-    supervisor_low_power_exit_fraction: float = 0.50,
+    supervisor_low_power_exit_fraction: float = 0.40,
     supervisor_path_safety_factor: float = 1.10,
     supervisor_reserve_distance_m: float = 2.0,
+    supervisor_max_intercept_range_m: float = 120.0,
+    supervisor_recharge_detect_wh: float = 50.0,
+    supervisor_post_recharge_exploration_wh: float = 75.0,
     supervisor_tilt_enter_deg: float = 20.0,
     supervisor_tilt_exit_deg: float = 18.0,
     supervisor_tilt_guard_min_speed_mps: float = 1.0,
@@ -1012,6 +1034,9 @@ def make_staged_env(
             low_power_exit_fraction=supervisor_low_power_exit_fraction,
             path_safety_factor=supervisor_path_safety_factor,
             reserve_distance_m=supervisor_reserve_distance_m,
+            max_intercept_range_m=supervisor_max_intercept_range_m,
+            recharge_detect_wh=supervisor_recharge_detect_wh,
+            post_recharge_exploration_wh=(supervisor_post_recharge_exploration_wh),
             tilt_enter_deg=supervisor_tilt_enter_deg,
             tilt_exit_deg=supervisor_tilt_exit_deg,
             tilt_guard_min_speed_mps=supervisor_tilt_guard_min_speed_mps,

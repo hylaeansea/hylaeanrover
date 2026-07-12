@@ -79,6 +79,24 @@ def main() -> None:
         action="store_true",
         help="record and auto-enable the shared in-game mission supervisor",
     )
+    p.add_argument(
+        "--runtime-power-capacity",
+        type=float,
+        default=None,
+        help="runtime battery capacity in Wh; defaults to the training capacity",
+    )
+    p.add_argument(
+        "--runtime-supervisor-low-power-enter-fraction",
+        type=float,
+        default=None,
+        help="runtime-only recovery entry fraction recorded in the sidecar",
+    )
+    p.add_argument(
+        "--runtime-supervisor-low-power-exit-fraction",
+        type=float,
+        default=None,
+        help="runtime-only recovery exit fraction recorded in the sidecar",
+    )
     args = p.parse_args()
 
     src_model, src_vecnorm = _source_pair(Path(args.run), args.source)
@@ -99,6 +117,13 @@ def main() -> None:
         stage=args.stage,
         frame_skip=args.frame_skip,
         mission_supervisor=args.mission_supervisor,
+        runtime_power_capacity_wh=args.runtime_power_capacity,
+        runtime_supervisor_low_power_enter_fraction=(
+            args.runtime_supervisor_low_power_enter_fraction
+        ),
+        runtime_supervisor_low_power_exit_fraction=(
+            args.runtime_supervisor_low_power_exit_fraction
+        ),
     )
     print(f"Exported {onnx}")
     print(f"Exported {norm}")

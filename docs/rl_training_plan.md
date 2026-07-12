@@ -233,7 +233,21 @@ Dir: `python/` (add extras as needed: `tensorboard`).
    exploration policy frozen when this hierarchical candidate passes; direct
    full-stage PPO is optional and must beat the transition and sparse mineral,
    pickup, beacon, and terminal-failure gates before replacing it.
-11. Watch `tensorboard --logdir runs/` for `rollout/ep_rew_mean` and
+11. Promote mineral/full candidates with `--runtime-power-capacity 1000`,
+   `--runtime-supervisor-low-power-enter-fraction 0.15`, and
+   `--runtime-supervisor-low-power-exit-fraction 0.20`.
+   Sidecars retain `training_power_capacity_wh=100` for provenance while the
+   game applies `runtime_power_capacity_wh=1000`. Training keeps the 35%/40%
+   curriculum gates, but the promoted runtime supervisor enters recovery at
+   15% (150 Wh), exits at 20% (200 Wh), and rejects deterministic low-power
+   intercepts beyond the trained 120 m envelope. A cube recharge below the 20%
+   exit threshold releases recovery with a temporary 75 Wh exploration budget,
+   after which the supervisor re-arms preservation at the lower of the
+   post-charge budget floor and the normal 15% runtime threshold.
+   While the supervisor is enabled, PPO receives zero-filled cube slots and a
+   constant healthy-power value, remaining a pure mineral-exploration policy.
+   The supervisor alone receives raw cube/power state and owns survival.
+12. Watch `tensorboard --logdir runs/` for `rollout/ep_rew_mean` and
    `ep_len_mean` rising.
 
 ## Files to modify

@@ -418,17 +418,35 @@ policy trained on one curriculum stage transfer cleanly to the next.
 ## Mission supervisor
 
 Stage 2 and later use a shared Rust mission supervisor around PPO. The policy
-owns mineral exploration while power and attitude are healthy. Below 35%
-power, the supervisor intercepts only a visible cube that the remaining energy
-can reach under the real drain model; otherwise it coasts. A speed-gated tilt
-guard brakes dangerous motion without treating a stationary slope as a
-rollover. The same state machine is exposed through `MissionSupervisorWrapper`
-for training/evaluation and through `--mission-supervisor` in the game.
+owns mineral exploration while power and attitude are healthy. Cube slots are
+masked from the policy observation whenever this hierarchical controller is
+enabled, preventing opportunistic cube pursuit at healthy power. The supervisor
+also presents a constant healthy battery value to PPO so the policy cannot
+independently park at its 100 Wh training-time reserve. The supervisor retains
+the unmodified cube and power observations privately. Training/evaluation
+defaults enter recovery below 35% power. Promoted 1 kWh mineral/full bundles
+override that runtime gate to 15% (150 Wh) and release at 20% (200 Wh). It
+intercepts only a visible cube that the remaining energy can reach under the
+real drain model and that is within the trained 120 m intercept envelope;
+otherwise it coasts. The separate runtime thresholds let one nearby 100 Wh
+cube resume exploration on the 1 kWh game battery. If a cube recharge is
+detected while the battery remains below the configured exit threshold, the
+supervisor still releases recovery and gives PPO a temporary 75 Wh exploration
+budget. It re-arms recovery at the lower of the configured entry reserve and
+the post-charge level minus 75 Wh. A speed-gated tilt guard brakes dangerous
+motion without treating a stationary slope as a rollover. The same state
+machine is exposed through `MissionSupervisorWrapper` for training/evaluation
+and through `--mission-supervisor` in the game.
 
 Enable it explicitly in Python with `--mission-supervisor`. Its decisions and
 override rate are reported through the `supervisor_*` `info` fields and the
 evaluation summary. Target-loss grace defaults to zero, so a cube leaving the
 actionable sensor does not cause blind forward throttle.
+
+Training remains at 100 Wh so power management binds within a practical
+episode. Promoted mineral/full sidecars separately record the 100 Wh training
+capacity and 1000 Wh runtime capacity. The game applies the runtime value;
+`model.zip` and `vecnorm.pkl` remain the accepted 100 Wh-trained artifacts.
 
 In the `full` stage, the same supervisor protects beacon use. It requires
 100 m of exploration before the first placement, 75 m between placements, and

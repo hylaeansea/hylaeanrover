@@ -520,6 +520,16 @@ class MissionSupervisorWrapperTests(unittest.TestCase):
         self.assertFalse(info["supervisor_overrode"])
         self.assertEqual(info["supervisor_mode"], "explore")
 
+    def test_policy_never_sees_cubes_owned_by_supervisor(self) -> None:
+        base = _SupervisorEnv(power_frac=0.99, cube=(25.0, 40.0))
+        env = MissionSupervisorWrapper(base, power_capacity_wh=1000.0)
+        obs, _ = env.reset()
+        self.assertTrue(np.all(obs[CUBE_OBS_START:POWER_OBS_INDEX] == 0.0))
+        self.assertEqual(obs[POWER_OBS_INDEX], np.float32(1.0))
+
+        obs, _, _, _, _ = env.step(7)
+        self.assertTrue(np.all(obs[CUBE_OBS_START:POWER_OBS_INDEX] == 0.0))
+
     def test_mid_power_remains_in_exploration_mode(self) -> None:
         base = _SupervisorEnv(power_frac=0.40)
         env = MissionSupervisorWrapper(base, power_capacity_wh=100.0)
@@ -532,7 +542,8 @@ class MissionSupervisorWrapperTests(unittest.TestCase):
     def test_reachable_cube_uses_intercept_controller(self) -> None:
         base = _SupervisorEnv(power_frac=0.30, cube=(15.0, 30.0))
         env = MissionSupervisorWrapper(base, power_capacity_wh=100.0)
-        env.reset()
+        obs, _ = env.reset()
+        self.assertTrue(np.all(obs[CUBE_OBS_START:POWER_OBS_INDEX] == 0.0))
         _, _, _, _, info = env.step(4)
         self.assertEqual(base.last_action, 6)
         self.assertEqual(info["supervisor_mode"], "intercept")

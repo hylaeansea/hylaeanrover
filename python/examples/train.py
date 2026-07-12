@@ -442,6 +442,11 @@ def _env_kwargs_from_args(
     cfg["supervisor_low_power_exit_fraction"] = args.supervisor_low_power_exit_fraction
     cfg["supervisor_path_safety_factor"] = args.supervisor_path_safety_factor
     cfg["supervisor_reserve_distance_m"] = args.supervisor_reserve_distance_m
+    cfg["supervisor_max_intercept_range_m"] = args.supervisor_max_intercept_range_m
+    cfg["supervisor_recharge_detect_wh"] = args.supervisor_recharge_detect_wh
+    cfg["supervisor_post_recharge_exploration_wh"] = (
+        args.supervisor_post_recharge_exploration_wh
+    )
     cfg["supervisor_tilt_enter_deg"] = args.supervisor_tilt_enter_deg
     cfg["supervisor_tilt_exit_deg"] = args.supervisor_tilt_exit_deg
     cfg["supervisor_tilt_guard_min_speed_mps"] = (
@@ -908,9 +913,14 @@ def main() -> None:
         help="apply the shared reachability/intercept/tilt supervisor",
     )
     p.add_argument("--supervisor-low-power-enter-fraction", type=float, default=0.35)
-    p.add_argument("--supervisor-low-power-exit-fraction", type=float, default=0.50)
+    p.add_argument("--supervisor-low-power-exit-fraction", type=float, default=0.40)
     p.add_argument("--supervisor-path-safety-factor", type=float, default=1.10)
     p.add_argument("--supervisor-reserve-distance-m", type=float, default=2.0)
+    p.add_argument("--supervisor-max-intercept-range-m", type=float, default=120.0)
+    p.add_argument("--supervisor-recharge-detect-wh", type=float, default=50.0)
+    p.add_argument(
+        "--supervisor-post-recharge-exploration-wh", type=float, default=75.0
+    )
     p.add_argument("--supervisor-tilt-enter-deg", type=float, default=20.0)
     p.add_argument("--supervisor-tilt-exit-deg", type=float, default=18.0)
     p.add_argument("--supervisor-tilt-guard-min-speed-mps", type=float, default=1.0)

@@ -852,7 +852,10 @@ python examples/promote_model.py \
   --run runs/stage2_minerals \
   --source best \
   --frame-skip "$FRAME_SKIP" \
-  --mission-supervisor
+  --mission-supervisor \
+  --runtime-power-capacity 1000 \
+  --runtime-supervisor-low-power-enter-fraction 0.15 \
+  --runtime-supervisor-low-power-exit-fraction 0.20
 ```
 
 ## 19. Record Stage 3 Baselines
@@ -977,7 +980,10 @@ python examples/promote_model.py \
   --run runs/stage3_full \
   --source best \
   --frame-skip "$FRAME_SKIP" \
-  --mission-supervisor
+  --mission-supervisor \
+  --runtime-power-capacity 1000 \
+  --runtime-supervisor-low-power-enter-fraction 0.15 \
+  --runtime-supervisor-low-power-exit-fraction 0.20
 ```
 
 ## 22. Export and Watch Policies
@@ -1014,9 +1020,19 @@ In the game, press `P` to toggle autopilot and `O` to reload the ONNX
 file after exporting a newer checkpoint.
 
 The mission supervisor is the deployment controller for Stage 2 and later.
-PPO explores for minerals while power and attitude are healthy. At 35% power
-it switches to a shared deterministic cube intercept when the nearest visible
-cube is reachable, or coasts to preserve reserve when no viable cube exists.
+PPO explores for minerals while power and attitude are healthy. The supervisor
+masks cube slots from PPO so visible cubes cannot divert the healthy-power
+mineral mission. It also presents constant healthy power to PPO so the learned
+100 Wh reserve behavior cannot park the 1 kWh rover before the runtime gate.
+The supervisor retains raw cube and power observations for its own decisions.
+At 35% training power it switches to a shared deterministic cube intercept when
+the nearest visible cube is reachable, or coasts to preserve reserve when no
+viable cube exists.
+Recovery normally releases at 40%. A detected cube recharge below 40% also
+releases recovery and grants up to 75 Wh of exploration before recovery is
+re-armed; this prevents the rover from parking immediately after a useful
+pickup on the 1 kWh runtime battery. Deterministic intercepts are limited to
+the validated 120 m envelope.
 Its kinetic tilt guard brakes above 20 degrees while speed exceeds 1 m/s and
 releases after the rover slows, so ordinary slopes do not permanently suppress
 exploration. Training and acceptance evals must pass `--mission-supervisor` so

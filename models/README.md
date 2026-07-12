@@ -41,11 +41,31 @@ enabled for `full`.
 ```bash
 python examples/promote_model.py \
   --stage minerals --run runs/stage2_minerals_explore_ppo_v3 \
-  --source best --frame-skip 4 --mission-supervisor
+  --source best --frame-skip 4 --mission-supervisor \
+  --runtime-power-capacity 1000 \
+  --runtime-supervisor-low-power-enter-fraction 0.15 \
+  --runtime-supervisor-low-power-exit-fraction 0.20
 python examples/promote_model.py \
   --stage full --run runs/stage2_minerals_explore_ppo_v3 \
-  --source best --frame-skip 4 --mission-supervisor
+  --source best --frame-skip 4 --mission-supervisor \
+  --runtime-power-capacity 1000 \
+  --runtime-supervisor-low-power-enter-fraction 0.15 \
+  --runtime-supervisor-low-power-exit-fraction 0.20
 ```
+
+The sidecar records both `training_power_capacity_wh=100` and
+`runtime_power_capacity_wh=1000`. The policy still observes only power
+fraction; the split keeps power pressure useful during training without
+shrinking the normal game battery. At runtime, a detected cube recharge can
+release low-power preservation even when the battery remains below the runtime
+20% recovery exit. The promoted 1 kWh bundles enter recovery at 15% (150 Wh),
+while 100 Wh training retains its 35%/40% curriculum thresholds. The supervisor
+then grants PPO up to 75 Wh of exploration before re-arming preservation, so a
+pickup funds continued mineral search
+instead of leaving the rover parked. The supervisor also masks cube slots from
+the deployed PPO observation and presents constant healthy power. This keeps
+PPO focused on minerals instead of applying its 100 Wh reserve behavior to the
+1 kWh battery, while the supervisor retains raw cube/power state for recovery.
 
 Do not promote `models/power_cubes/` until the Stage 1 gates in
 [`../docs/rl_stage0_stage1_hardening_plan.md`](../docs/rl_stage0_stage1_hardening_plan.md)

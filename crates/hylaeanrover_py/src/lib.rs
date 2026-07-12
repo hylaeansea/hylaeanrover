@@ -76,10 +76,13 @@ impl MissionSupervisor {
     #[new]
     #[pyo3(signature = (
         low_power_enter_fraction = 0.35,
-        low_power_exit_fraction = 0.50,
+        low_power_exit_fraction = 0.40,
         path_safety_factor = 1.10,
         reserve_distance_m = 2.0,
         drain_wh_per_meter = 0.5,
+        max_intercept_range_m = 120.0,
+        recharge_detect_wh = 50.0,
+        post_recharge_exploration_wh = 75.0,
         tilt_enter_deg = 20.0,
         tilt_exit_deg = 18.0,
         tilt_guard_min_speed_mps = 1.0,
@@ -98,6 +101,9 @@ impl MissionSupervisor {
         path_safety_factor: f32,
         reserve_distance_m: f32,
         drain_wh_per_meter: f32,
+        max_intercept_range_m: f32,
+        recharge_detect_wh: f32,
+        post_recharge_exploration_wh: f32,
         tilt_enter_deg: f32,
         tilt_exit_deg: f32,
         tilt_guard_min_speed_mps: f32,
@@ -123,6 +129,9 @@ impl MissionSupervisor {
         for (name, value) in [
             ("path_safety_factor", path_safety_factor),
             ("drain_wh_per_meter", drain_wh_per_meter),
+            ("max_intercept_range_m", max_intercept_range_m),
+            ("recharge_detect_wh", recharge_detect_wh),
+            ("post_recharge_exploration_wh", post_recharge_exploration_wh),
             ("tilt_enter_deg", tilt_enter_deg),
             ("tilt_guard_min_speed_mps", tilt_guard_min_speed_mps),
             ("bearing_deadband_deg", bearing_deadband_deg),
@@ -157,6 +166,9 @@ impl MissionSupervisor {
             path_safety_factor,
             reserve_distance_m,
             drain_wh_per_meter,
+            max_intercept_range_m,
+            recharge_detect_wh,
+            post_recharge_exploration_wh,
             tilt_enter_deg,
             tilt_exit_deg,
             tilt_guard_min_speed_mps,
@@ -176,6 +188,16 @@ impl MissionSupervisor {
 
     fn reset(&self) {
         self.inner.borrow_mut().reset();
+    }
+
+    fn policy_observation(&self, observation: Vec<f32>) -> PyResult<Vec<f32>> {
+        if observation.len() != OBS_DIM {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "observation length {} != OBS_DIM {OBS_DIM}",
+                observation.len()
+            )));
+        }
+        Ok(self.inner.borrow().policy_observation(&observation))
     }
 
     #[pyo3(signature = (observation, proposed_action, power_capacity_wh, distance_m = 0.0))]

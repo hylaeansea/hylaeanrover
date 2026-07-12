@@ -5,19 +5,16 @@ Produces two files next to the chosen `.onnx` path:
 
   * ``<out>.onnx``      — the policy network: obs[1,41] → action logits[1,10]
   * ``<out>.norm.json`` — VecNormalize obs stats (mean/var/clip/epsilon),
-                          the training frame-skip, and two pieces of the
-                          env config the stage trained under
-                          (beacons_enabled, power_capacity_wh), so the
-                          game replays the policy under the *same*
-                          conditions it learned in instead of the game's
-                          own defaults (beacons always live, 1 kWh
-                          battery). Without this, a stage trained with
+                          the training frame-skip, beacon mode, and separate
+                          training/runtime battery capacities. This preserves
+                          100 Wh training provenance while allowing the normal
+                          1 kWh game battery. Without the beacon metadata, a
+                          stage trained with
                           beacons disabled never learns to avoid action 9
                           (it's an inert no-op at training time, identical
                           to coasting) — but the game always has beacons
                           live, so if the policy ever outputs that action
-                          once it drives past what its smaller
-                          training-time battery ever let it reach, it
+                          once it drives past familiar training states, it
                           silently drops a real beacon and can end the
                           run.
 
@@ -74,6 +71,9 @@ def export_policy(
     stage: str = "full",
     frame_skip: int = 1,
     mission_supervisor: bool = False,
+    runtime_power_capacity_wh: float | None = None,
+    runtime_supervisor_low_power_enter_fraction: float | None = None,
+    runtime_supervisor_low_power_exit_fraction: float | None = None,
     opset: int = 17,
 ) -> tuple[Path, Path]:
     """Export `model_path` (+ `vecnorm_path`) to `out_onnx` + sibling
@@ -108,6 +108,24 @@ def export_policy(
     # excluded.
     raw_env = venv.envs[0].unwrapped
     vn = VecNormalize.load(str(vecnorm_path), venv)
+    training_power_capacity_wh = float(raw_env.power_capacity)
+    runtime_power_capacity_wh = (
+        training_power_capacity_wh
+        if runtime_power_capacity_wh is None
+        else float(runtime_power_capacity_wh)
+    )
+    if not runtime_power_capacity_wh > 0.0:
+        raise ValueError("runtime_power_capacity_wh must be positive")
+    runtime_enter = runtime_supervisor_low_power_enter_fraction
+    runtime_exit = runtime_supervisor_low_power_exit_fraction
+    if (runtime_enter is None) != (runtime_exit is None):
+        raise ValueError(
+            "runtime supervisor enter and exit fractions must be set together"
+        )
+    if runtime_enter is not None and not (0.0 <= runtime_enter < runtime_exit <= 1.0):
+        raise ValueError(
+            "runtime supervisor fractions must satisfy 0 <= enter < exit <= 1"
+        )
     stats = {
         "mean": vn.obs_rms.mean.astype(float).tolist(),
         "var": vn.obs_rms.var.astype(float).tolist(),
@@ -119,11 +137,17 @@ def export_policy(
         # Training-time env config (see module docstring for why this
         # matters).
         "beacons_enabled": bool(raw_env.beacons_enabled),
-        "power_capacity_wh": float(raw_env.power_capacity),
+        # Legacy runtime key retained for older game builds.
+        "power_capacity_wh": runtime_power_capacity_wh,
+        "training_power_capacity_wh": training_power_capacity_wh,
+        "runtime_power_capacity_wh": runtime_power_capacity_wh,
         # Deployment controller required by hierarchical mineral/full
         # candidates. The game also accepts the legacy CLI flag.
         "mission_supervisor": bool(mission_supervisor),
     }
+    if runtime_enter is not None:
+        stats["supervisor_low_power_enter_fraction"] = float(runtime_enter)
+        stats["supervisor_low_power_exit_fraction"] = float(runtime_exit)
     venv.close()
     if len(stats["mean"]) != OBS_DIM:
         raise SystemExit(f"vecnorm obs dim {len(stats['mean'])} != OBS_DIM {OBS_DIM}")

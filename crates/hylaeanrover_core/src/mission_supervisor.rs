@@ -28,6 +28,9 @@ pub struct MissionSupervisorConfig {
     pub path_safety_factor: f32,
     pub reserve_distance_m: f32,
     pub drain_wh_per_meter: f32,
+    pub max_intercept_range_m: f32,
+    pub recharge_detect_wh: f32,
+    pub post_recharge_exploration_wh: f32,
     pub tilt_enter_deg: f32,
     pub tilt_exit_deg: f32,
     pub tilt_guard_min_speed_mps: f32,
@@ -45,10 +48,13 @@ impl Default for MissionSupervisorConfig {
     fn default() -> Self {
         Self {
             low_power_enter_fraction: 0.35,
-            low_power_exit_fraction: 0.50,
+            low_power_exit_fraction: 0.40,
             path_safety_factor: 1.10,
             reserve_distance_m: 2.0,
             drain_wh_per_meter: 0.5,
+            max_intercept_range_m: 120.0,
+            recharge_detect_wh: 50.0,
+            post_recharge_exploration_wh: 75.0,
             tilt_enter_deg: 20.0,
             tilt_exit_deg: 18.0,
             tilt_guard_min_speed_mps: 1.0,
@@ -109,6 +115,8 @@ pub struct MissionSupervisor {
     target_committed: bool,
     target_loss_decisions: u32,
     last_beacon_distance_m: Option<f32>,
+    last_power_wh: Option<f32>,
+    recovery_rearm_wh: Option<f32>,
 }
 
 impl MissionSupervisor {
@@ -120,6 +128,8 @@ impl MissionSupervisor {
             target_committed: false,
             target_loss_decisions: 0,
             last_beacon_distance_m: None,
+            last_power_wh: None,
+            recovery_rearm_wh: None,
         }
     }
 
@@ -133,6 +143,24 @@ impl MissionSupervisor {
         self.target_committed = false;
         self.target_loss_decisions = 0;
         self.last_beacon_distance_m = None;
+        self.last_power_wh = None;
+        self.recovery_rearm_wh = None;
+    }
+
+    /// Return the observation presented to the mission policy.
+    ///
+    /// Cube interception and power management belong exclusively to this
+    /// supervisor. Hiding cube slots and presenting a constant healthy battery
+    /// prevents the mineral policy from chasing cubes or independently parking
+    /// at its training-time reserve threshold. `decide` continues to use the
+    /// unmodified observation for low-power recovery.
+    pub fn policy_observation(&self, observation: &[f32]) -> Vec<f32> {
+        let mut policy_observation = observation.to_vec();
+        if policy_observation.len() > POWER_OBS_INDEX {
+            policy_observation[CUBE_OBS_START..POWER_OBS_INDEX].fill(0.0);
+            policy_observation[POWER_OBS_INDEX] = 1.0;
+        }
+        policy_observation
     }
 
     pub fn decide(
@@ -169,14 +197,32 @@ impl MissionSupervisor {
         }
 
         let power_fraction = observation[POWER_OBS_INDEX].clamp(0.0, 1.0);
+        let power_capacity_wh = power_capacity_wh.max(0.0);
+        let power_wh = power_fraction * power_capacity_wh;
+        let power_gain_wh = self
+            .last_power_wh
+            .replace(power_wh)
+            .map_or(0.0, |previous| power_wh - previous);
+        let default_recovery_enter_wh = self.config.low_power_enter_fraction * power_capacity_wh;
+        let recovery_enter_wh = self.recovery_rearm_wh.unwrap_or(default_recovery_enter_wh);
         if self.recovering {
             if power_fraction >= self.config.low_power_exit_fraction {
                 self.recovering = false;
+                self.recovery_rearm_wh = None;
+                self.target_committed = false;
+                self.target_loss_decisions = 0;
+            } else if power_gain_wh >= self.config.recharge_detect_wh {
+                self.recovering = false;
+                self.recovery_rearm_wh = Some(
+                    default_recovery_enter_wh
+                        .min((power_wh - self.config.post_recharge_exploration_wh).max(0.0)),
+                );
                 self.target_committed = false;
                 self.target_loss_decisions = 0;
             }
-        } else if power_fraction <= self.config.low_power_enter_fraction {
+        } else if power_wh <= recovery_enter_wh {
             self.recovering = true;
+            self.recovery_rearm_wh = None;
         }
 
         let speed_mps = observation[0].abs();
@@ -194,7 +240,7 @@ impl MissionSupervisor {
         }
 
         let available_range_m = if self.config.drain_wh_per_meter > 0.0 {
-            power_fraction * power_capacity_wh.max(0.0) / self.config.drain_wh_per_meter
+            power_wh / self.config.drain_wh_per_meter
         } else {
             0.0
         };
@@ -262,7 +308,8 @@ impl MissionSupervisor {
         if let Some((bearing, range)) = target {
             let required_range_m =
                 range * self.config.path_safety_factor + self.config.reserve_distance_m;
-            let viable = required_range_m <= available_range_m;
+            let viable =
+                range <= self.config.max_intercept_range_m && required_range_m <= available_range_m;
             self.target_loss_decisions = 0;
             if viable {
                 self.target_committed = true;
@@ -410,6 +457,22 @@ mod tests {
     }
 
     #[test]
+    fn policy_observation_hides_supervisor_owned_power_and_cube_inputs() {
+        let supervisor = MissionSupervisor::new(MissionSupervisorConfig::default());
+        let observation = obs(0.20, 0.0, 0.0, Some((25.0, 40.0)));
+        let policy_observation = supervisor.policy_observation(&observation);
+
+        assert!(
+            policy_observation[CUBE_OBS_START..POWER_OBS_INDEX]
+                .iter()
+                .all(|value| *value == 0.0)
+        );
+        assert_eq!(policy_observation[POWER_OBS_INDEX], 1.0);
+        assert_eq!(observation[POWER_OBS_INDEX], 0.20);
+        assert_eq!(nearest_visible_cube(&observation), Some((25.0, 40.0)));
+    }
+
+    #[test]
     fn low_power_without_target_preserves_reserve() {
         let mut supervisor = MissionSupervisor::new(MissionSupervisorConfig::default());
         let decision = supervisor.decide(&obs(0.3, 0.0, 0.0, None), 7, 100.0);
@@ -437,14 +500,39 @@ mod tests {
     }
 
     #[test]
+    fn target_beyond_trained_intercept_range_preserves_reserve() {
+        let mut supervisor = MissionSupervisor::new(MissionSupervisorConfig::default());
+        let decision = supervisor.decide(&obs(0.35, 0.0, 0.0, Some((0.0, 400.0))), 7, 1000.0);
+        assert_eq!(decision.action, COAST_ACTION);
+        assert_eq!(decision.mode, SupervisorMode::Preserve);
+        assert!(!decision.target_viable);
+    }
+
+    #[test]
     fn recovery_hysteresis_holds_until_exit_threshold() {
         let mut supervisor = MissionSupervisor::new(MissionSupervisorConfig::default());
         supervisor.decide(&obs(0.3, 0.0, 0.0, None), 7, 100.0);
-        let still_recovering = supervisor.decide(&obs(0.4, 0.0, 0.0, None), 7, 100.0);
+        let still_recovering = supervisor.decide(&obs(0.39, 0.0, 0.0, None), 7, 100.0);
         assert_eq!(still_recovering.mode, SupervisorMode::Preserve);
         let recovered = supervisor.decide(&obs(0.8, 0.0, 0.0, None), 7, 100.0);
         assert_eq!(recovered.mode, SupervisorMode::Explore);
         assert_eq!(recovered.action, 7);
+    }
+
+    #[test]
+    fn cube_recharge_funds_exploration_below_fixed_exit_threshold() {
+        let mut supervisor = MissionSupervisor::new(MissionSupervisorConfig::default());
+        let entered = supervisor.decide(&obs(0.30, 0.0, 0.0, None), 7, 1000.0);
+        assert_eq!(entered.mode, SupervisorMode::Preserve);
+
+        let recharged = supervisor.decide(&obs(0.39, 0.0, 0.0, None), 7, 1000.0);
+        assert_eq!(recharged.mode, SupervisorMode::Explore);
+        assert_eq!(recharged.action, 7);
+
+        let budget_remaining = supervisor.decide(&obs(0.32, 0.0, 0.0, None), 7, 1000.0);
+        assert_eq!(budget_remaining.mode, SupervisorMode::Explore);
+        let budget_spent = supervisor.decide(&obs(0.31, 0.0, 0.0, None), 7, 1000.0);
+        assert_eq!(budget_spent.mode, SupervisorMode::Preserve);
     }
 
     #[test]

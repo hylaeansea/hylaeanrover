@@ -144,7 +144,7 @@ fn norm_path_for(onnx_path: &Path) -> PathBuf {
 }
 
 /// If `--policy <path>` is present and its sidecar `.norm.json` carries
-/// the training-time `beacons_enabled` / `power_capacity_wh` (see
+/// the exported `beacons_enabled` / runtime power capacity (see
 /// `export.py`), apply them on top of `default` so the game replays the
 /// checkpoint under the same conditions it trained in. Must run *before*
 /// `RoverCorePlugin` is constructed (that's where these fields get baked
@@ -184,7 +184,7 @@ pub(crate) fn resolve_core_config(default: RoverCoreConfig) -> RoverCoreConfig {
         || cfg.power_capacity_wh != default.power_capacity_wh
     {
         eprintln!(
-            "Autopilot: matching training config from {} (beacons_enabled={}, power_capacity_wh={})",
+            "Autopilot: applying runtime config from {} (beacons_enabled={}, power_capacity_wh={})",
             norm_path.display(),
             cfg.beacons_enabled,
             cfg.power_capacity_wh
@@ -194,7 +194,7 @@ pub(crate) fn resolve_core_config(default: RoverCoreConfig) -> RoverCoreConfig {
 }
 
 /// Parse `norm_json` and apply whichever of `beacons_enabled` /
-/// `power_capacity_wh` it contains on top of `default` (see
+/// runtime power capacity it contains on top of `default` (see
 /// `resolve_core_config` for why `cube_spawn_lambda`/`cube_spawn_extent`
 /// are deliberately *not* read here even if an older or newer sidecar
 /// happens to contain them). Split out from `resolve_core_config` so the
@@ -209,7 +209,10 @@ fn apply_norm_overrides(default: RoverCoreConfig, norm_json: &str) -> RoverCoreC
     if let Some(b) = v["beacons_enabled"].as_bool() {
         cfg.beacons_enabled = b;
     }
-    if let Some(wh) = v["power_capacity_wh"].as_f64() {
+    if let Some(wh) = v["runtime_power_capacity_wh"]
+        .as_f64()
+        .or_else(|| v["power_capacity_wh"].as_f64())
+    {
         cfg.power_capacity_wh = wh as f32;
     }
     cfg
@@ -217,12 +220,8 @@ fn apply_norm_overrides(default: RoverCoreConfig, norm_json: &str) -> RoverCoreC
 
 fn load_runtime(onnx_path: &Path) -> TractResult<AutopilotRuntime> {
     let policy = load_policy(onnx_path)?;
-    let (norm, frame_skip, sidecar_supervisor, beacons_enabled) =
+    let (norm, frame_skip, sidecar_supervisor, supervisor_config) =
         load_norm(&norm_path_for(onnx_path))?;
-    let supervisor_config = MissionSupervisorConfig {
-        beacon_guard_enabled: beacons_enabled,
-        ..MissionSupervisorConfig::default()
-    };
     Ok(AutopilotRuntime {
         policy,
         norm,
@@ -246,7 +245,7 @@ fn load_policy(path: &Path) -> TractResult<Policy> {
 
 /// Parse the `*.norm.json` sidecar: observation normalization stats plus
 /// the frame-skip the policy was trained with.
-fn load_norm(path: &Path) -> TractResult<(NormStats, u32, bool, bool)> {
+fn load_norm(path: &Path) -> TractResult<(NormStats, u32, bool, MissionSupervisorConfig)> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?;
     let v: serde_json::Value = serde_json::from_str(&text)
@@ -276,6 +275,7 @@ fn load_norm(path: &Path) -> TractResult<(NormStats, u32, bool, bool)> {
     // `frame_skip` is optional for backward compatibility (default 1).
     let frame_skip = v["frame_skip"].as_u64().unwrap_or(1) as u32;
     let (mission_supervisor, beacons_enabled) = sidecar_runtime_flags(&v);
+    let supervisor_config = supervisor_config_from_sidecar(&v, beacons_enabled);
     Ok((
         NormStats {
             mean,
@@ -285,7 +285,7 @@ fn load_norm(path: &Path) -> TractResult<(NormStats, u32, bool, bool)> {
         },
         frame_skip,
         mission_supervisor,
-        beacons_enabled,
+        supervisor_config,
     ))
 }
 
@@ -294,6 +294,29 @@ fn sidecar_runtime_flags(v: &serde_json::Value) -> (bool, bool) {
         v["mission_supervisor"].as_bool().unwrap_or(false),
         v["beacons_enabled"].as_bool().unwrap_or(true),
     )
+}
+
+fn supervisor_config_from_sidecar(
+    v: &serde_json::Value,
+    beacons_enabled: bool,
+) -> MissionSupervisorConfig {
+    let mut config = MissionSupervisorConfig {
+        beacon_guard_enabled: beacons_enabled,
+        ..MissionSupervisorConfig::default()
+    };
+    let enter = v["supervisor_low_power_enter_fraction"]
+        .as_f64()
+        .map(|value| value as f32)
+        .unwrap_or(config.low_power_enter_fraction);
+    let exit = v["supervisor_low_power_exit_fraction"]
+        .as_f64()
+        .map(|value| value as f32)
+        .unwrap_or(config.low_power_exit_fraction);
+    if enter.is_finite() && exit.is_finite() && 0.0 <= enter && enter < exit && exit <= 1.0 {
+        config.low_power_enter_fraction = enter;
+        config.low_power_exit_fraction = exit;
+    }
+    config
 }
 
 /// Map a discrete action index [0..9] to a `RoverAction`. Mirrors the
@@ -364,7 +387,11 @@ fn autopilot_drive(
             .and_then(|id| xforms.get(id).ok())
             .map(|gxf| gxf.translation());
         let obs = build_observation(&telem, &power, &reward, chassis_pos, &maps);
-        let normalized = runtime.norm.normalize(&obs);
+        let policy_obs = runtime.supervisor.as_ref().map_or_else(
+            || obs.clone(),
+            |supervisor| supervisor.policy_observation(&obs),
+        );
+        let normalized = runtime.norm.normalize(&policy_obs);
         match infer(&runtime.policy, &normalized) {
             Ok(policy_index) => {
                 let index = if let Some(supervisor) = runtime.supervisor.as_mut() {
@@ -448,6 +475,18 @@ mod tests {
         assert_eq!(cfg.cube_spawn_extent, default.cube_spawn_extent);
     }
 
+    #[test]
+    fn runtime_power_capacity_overrides_training_and_legacy_values() {
+        let default = RoverCoreConfig::default();
+        let norm_json = r#"{
+            "power_capacity_wh": 100.0,
+            "training_power_capacity_wh": 100.0,
+            "runtime_power_capacity_wh": 1000.0
+        }"#;
+        let cfg = apply_norm_overrides(default, norm_json);
+        assert_eq!(cfg.power_capacity_wh, 1000.0);
+    }
+
     // Old-format sidecars (exported before this fix) lack these keys
     // entirely — must not regress existing bundles like `models/locomotion`.
     #[test]
@@ -492,5 +531,43 @@ mod tests {
 
         let legacy: serde_json::Value = serde_json::from_str(r#"{}"#).unwrap();
         assert_eq!(sidecar_runtime_flags(&legacy), (false, true));
+    }
+
+    #[test]
+    fn sidecar_applies_runtime_supervisor_power_thresholds() {
+        let sidecar: serde_json::Value = serde_json::from_str(
+            r#"{
+                "beacons_enabled": true,
+                "supervisor_low_power_enter_fraction": 0.15,
+                "supervisor_low_power_exit_fraction": 0.20
+            }"#,
+        )
+        .unwrap();
+        let config = supervisor_config_from_sidecar(&sidecar, true);
+        assert_eq!(config.low_power_enter_fraction, 0.15);
+        assert_eq!(config.low_power_exit_fraction, 0.20);
+        assert!(config.beacon_guard_enabled);
+    }
+
+    #[test]
+    fn invalid_sidecar_power_thresholds_fall_back_to_training_defaults() {
+        let sidecar: serde_json::Value = serde_json::from_str(
+            r#"{
+                "supervisor_low_power_enter_fraction": 0.40,
+                "supervisor_low_power_exit_fraction": 0.15
+            }"#,
+        )
+        .unwrap();
+        let config = supervisor_config_from_sidecar(&sidecar, false);
+        let defaults = MissionSupervisorConfig::default();
+        assert_eq!(
+            config.low_power_enter_fraction,
+            defaults.low_power_enter_fraction
+        );
+        assert_eq!(
+            config.low_power_exit_fraction,
+            defaults.low_power_exit_fraction
+        );
+        assert!(!config.beacon_guard_enabled);
     }
 }
