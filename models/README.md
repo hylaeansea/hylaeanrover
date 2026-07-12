@@ -73,6 +73,12 @@ pass. That means the policy must beat the promoted locomotion policy on
 pickup rate, end power, out-of-power rate, sparse-game behavior, and
 low-power visible-cube approach metrics.
 
+Coverage-aware mineral/full candidates must be promoted with
+`--coverage-observation`. This writes `coverage_version=1` to the sidecar so
+the game replaces PPO's hidden cube slots with the same 18 frontier features
+used in training. Existing promoted bundles intentionally omit that key and
+remain unchanged until a coverage candidate passes its acceptance gates.
+
 ## Using a promoted model
 
 Resume training from the stage's best (e.g. continue locomotion, or warm-

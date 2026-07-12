@@ -97,6 +97,11 @@ def main() -> None:
         default=None,
         help="runtime-only recovery exit fraction recorded in the sidecar",
     )
+    p.add_argument(
+        "--coverage-observation",
+        action="store_true",
+        help="record and enable the coverage_v1 policy sensor",
+    )
     args = p.parse_args()
 
     src_model, src_vecnorm = _source_pair(Path(args.run), args.source)
@@ -124,6 +129,7 @@ def main() -> None:
         runtime_supervisor_low_power_exit_fraction=(
             args.runtime_supervisor_low_power_exit_fraction
         ),
+        coverage_observation=args.coverage_observation,
     )
     print(f"Exported {onnx}")
     print(f"Exported {norm}")

@@ -36,29 +36,66 @@ from hylaeanrover import MissionSupervisorCore, RoverEnv
 # driving far while ignoring visible cubes.
 STAGE_WEIGHTS: dict[str, dict[str, float]] = {
     # Drive far, stay upright, manage power. Densest signal.
-    "locomotion": {"distance": 1.0, "cube": 0.0, "mineral": 0.0, "beacon": 0.0},
+    "locomotion": {
+        "distance": 1.0,
+        "cube": 0.0,
+        "mineral": 0.0,
+        "beacon": 0.0,
+        "novel_distance": 0.0,
+        "novel_mineral": 0.0,
+    },
     # Isolated visible-cube intercept. No distance reward: pickup is the task.
     "cube_intercept": {
         "distance": 0.0,
         "cube": 1.0,
         "mineral": 0.0,
         "beacon": 0.0,
+        "novel_distance": 0.0,
+        "novel_mineral": 0.0,
     },
     # Low-power no-target discipline. This teaches the policy not to burn a
     # nearly empty battery when the actionable cube sensor is empty.
-    "power_idle": {"distance": 0.0, "cube": 0.0, "mineral": 0.0, "beacon": 0.0},
+    "power_idle": {
+        "distance": 0.0,
+        "cube": 0.0,
+        "mineral": 0.0,
+        "beacon": 0.0,
+        "novel_distance": 0.0,
+        "novel_mineral": 0.0,
+    },
     # Also reward actively seeking out and collecting power cubes. Distance is
     # off in this stage so the policy cannot pass by driving until the battery
     # dies; later stages reintroduce travel objectives after pickup behavior
     # is reliable.
-    "power_cubes": {"distance": 0.0, "cube": 1.0, "mineral": 0.0, "beacon": 0.0},
+    "power_cubes": {
+        "distance": 0.0,
+        "cube": 1.0,
+        "mineral": 0.0,
+        "beacon": 0.0,
+        "novel_distance": 0.0,
+        "novel_mineral": 0.0,
+    },
     # Also reward crossing scarce-mineral ground. Power cubes are survival
     # tools in Stage 2, not the objective: the policy should pick them up
     # because power enables more distance/mineral reward, not because the
     # pickup itself is paid like it was in Stage 1.
-    "minerals": {"distance": 1.0, "cube": 0.0, "mineral": 1.0, "beacon": 0.0},
+    "minerals": {
+        "distance": 1.0,
+        "cube": 0.0,
+        "mineral": 1.0,
+        "beacon": 0.0,
+        "novel_distance": 0.0,
+        "novel_mineral": 0.0,
+    },
     # Full mission, including strategic beacon placement.
-    "full": {"distance": 1.0, "cube": 1.0, "mineral": 1.0, "beacon": 1.0},
+    "full": {
+        "distance": 1.0,
+        "cube": 1.0,
+        "mineral": 1.0,
+        "beacon": 1.0,
+        "novel_distance": 0.0,
+        "novel_mineral": 0.0,
+    },
 }
 
 STAGES = tuple(STAGE_WEIGHTS.keys())
@@ -225,6 +262,12 @@ EVAL_SCENARIOS: dict[str, dict[str, Any]] = {
         "terrain_height": "fixed_2_0",
         "cube_shaping": "low_power",
     },
+    "minerals_coverage": {
+        "cube_spawn_preset": "sparse_game",
+        "terrain_height": "mixed_1_2",
+        "cube_shaping": "off",
+        "coverage_observation": True,
+    },
     "terrain_fixed_1_0": {"terrain_height": "fixed_1_0"},
     "terrain_fixed_1_5": {"terrain_height": "fixed_1_5"},
     "terrain_fixed_2_0": {"terrain_height": "fixed_2_0"},
@@ -348,9 +391,11 @@ class MissionSupervisorWrapper(gym.Wrapper):
         beacon_spacing_m: float = 75.0,
         beacon_auto_deploy: bool = True,
         beacon_surface_score_threshold: float = 150.0,
+        coverage_observation: bool = False,
     ) -> None:
         super().__init__(env)
         self.power_capacity_wh = float(power_capacity_wh)
+        self.coverage_observation = bool(coverage_observation)
         self._supervisor = MissionSupervisorCore(
             low_power_enter_fraction=low_power_enter_fraction,
             low_power_exit_fraction=low_power_exit_fraction,
@@ -389,6 +434,7 @@ class MissionSupervisorWrapper(gym.Wrapper):
         available_range_m: float = 0.0,
     ) -> None:
         info["mission_supervisor"] = True
+        info["coverage_observation"] = self.coverage_observation
         info["supervisor_policy_action"] = proposed_action
         info["supervisor_action"] = selected_action
         info["supervisor_mode"] = mode
@@ -427,8 +473,9 @@ class MissionSupervisorWrapper(gym.Wrapper):
         self._overrides = 0
         self._mode_counts = {}
         self._annotate(info)
+        coverage = info.get("coverage_features") if self.coverage_observation else None
         policy_obs = self._supervisor.policy_observation(
-            [float(value) for value in obs]
+            [float(value) for value in obs], coverage
         )
         return np.asarray(policy_obs, dtype=np.float32), info
 
@@ -470,8 +517,9 @@ class MissionSupervisorWrapper(gym.Wrapper):
             target_range_m=target_range_m,
             available_range_m=available_range_m,
         )
+        coverage = info.get("coverage_features") if self.coverage_observation else None
         policy_obs = self._supervisor.policy_observation(
-            [float(value) for value in obs]
+            [float(value) for value in obs], coverage
         )
         return (
             np.asarray(policy_obs, dtype=np.float32),
@@ -517,6 +565,7 @@ class StagedRewardWrapper(gym.Wrapper):
         cube_progress_range_epsilon: float = 0.1,
         cube_progress_bearing_epsilon_deg: float = 1.0,
         rejected_beacon_penalty: float = 5.0,
+        coverage_observation: bool = False,
     ) -> None:
         if stage not in STAGE_WEIGHTS:
             raise ValueError(f"unknown stage {stage!r}; choose from {STAGES}")
@@ -526,7 +575,17 @@ class StagedRewardWrapper(gym.Wrapper):
             raise ValueError(f"unknown cube_shaping {cube_shaping!r}")
         super().__init__(env)
         self.stage = stage
-        self._w = STAGE_WEIGHTS[stage]
+        self.coverage_observation = bool(coverage_observation)
+        self._w = dict(STAGE_WEIGHTS[stage])
+        if self.coverage_observation:
+            if stage not in ("minerals", "full"):
+                raise ValueError("coverage observation is only valid for minerals/full")
+            self._w.update(
+                distance=0.1,
+                mineral=0.0,
+                novel_distance=0.9,
+                novel_mineral=1.0,
+            )
         self.flip_penalty = flip_penalty
         self.tilt_penalty = tilt_penalty
         self.tilt_threshold_deg = tilt_threshold_deg
@@ -554,7 +613,14 @@ class StagedRewardWrapper(gym.Wrapper):
         self.rejected_beacon_penalty = rejected_beacon_penalty
         # Cumulative component totals from the previous step, so we can
         # take deltas. Seeded in reset().
-        self._prev = {"distance": 0.0, "cube": 0.0, "mineral": 0.0, "beacon": 0.0}
+        self._prev = {
+            "distance": 0.0,
+            "cube": 0.0,
+            "mineral": 0.0,
+            "beacon": 0.0,
+            "novel_distance": 0.0,
+            "novel_mineral": 0.0,
+        }
         self._prev_power_frac = 1.0
         self._prev_visible_range: Optional[float] = None
         self._low_power_visible_steps = 0
@@ -573,6 +639,8 @@ class StagedRewardWrapper(gym.Wrapper):
             "cube": float(info.get("reward_cube_bonus", 0.0)),
             "mineral": float(info.get("reward_mineral_integral", 0.0)),
             "beacon": float(info.get("reward_beacon_bonus", 0.0)),
+            "novel_distance": float(info.get("reward_novel_distance", 0.0)),
+            "novel_mineral": float(info.get("reward_novel_mineral_integral", 0.0)),
         }
 
     def _annotate_info(self, info: dict[str, Any]) -> None:
@@ -582,6 +650,7 @@ class StagedRewardWrapper(gym.Wrapper):
             info["cube_spawn_preset"] = self.cube_spawn_preset
         info["locomotion_shaping"] = self.locomotion_shaping
         info["cube_shaping"] = self.cube_shaping
+        info["coverage_observation"] = self.coverage_observation
 
     @staticmethod
     def _is_coast_action(action: int) -> bool:
@@ -821,15 +890,17 @@ class StagedRewardWrapper(gym.Wrapper):
         obs, _reward, terminated, truncated, info = self.env.step(action)
 
         cur = self._components(info)
-        deltas = {
-            key: cur[key] - self._prev[key]
-            for key in ("distance", "cube", "mineral", "beacon")
-        }
+        deltas = {key: cur[key] - self._prev[key] for key in cur}
+        if info.get("supervisor_mode") not in (None, "explore", "beacon_deploy"):
+            deltas["novel_distance"] = 0.0
+            deltas["novel_mineral"] = 0.0
         shaped = (
             self._w["distance"] * deltas["distance"]
             + self._w["cube"] * deltas["cube"]
             + self._w["mineral"] * deltas["mineral"]
             + self._w["beacon"] * deltas["beacon"]
+            + self._w["novel_distance"] * deltas["novel_distance"]
+            + self._w["novel_mineral"] * deltas["novel_mineral"]
         )
         shaped += self._locomotion_power_shaping(
             int(action), info, terminated, deltas["distance"]
@@ -899,6 +970,7 @@ def make_staged_env(
     tilt_penalty: float = 0.0,
     tilt_threshold_deg: float = 45.0,
     mission_supervisor: bool = False,
+    coverage_observation: bool = False,
     supervisor_low_power_enter_fraction: float = 0.35,
     supervisor_low_power_exit_fraction: float = 0.40,
     supervisor_path_safety_factor: float = 1.10,
@@ -1024,6 +1096,8 @@ def make_staged_env(
         forced_cube_bearing_deg=forced_cube_bearing_deg,
         forced_cube_bearing_range=forced_cube_bearing_range,
     )
+    if coverage_observation and not mission_supervisor:
+        raise ValueError("coverage observation requires mission_supervisor")
     if frame_skip > 1:
         env = ActionRepeat(env, frame_skip)
     if mission_supervisor:
@@ -1046,6 +1120,7 @@ def make_staged_env(
             beacon_spacing_m=supervisor_beacon_spacing_m,
             beacon_auto_deploy=supervisor_beacon_auto_deploy,
             beacon_surface_score_threshold=(supervisor_beacon_surface_score_threshold),
+            coverage_observation=coverage_observation,
         )
     return StagedRewardWrapper(
         env,
@@ -1075,4 +1150,5 @@ def make_staged_env(
         loss_of_sight_penalty=loss_of_sight_penalty,
         intercept_failure_penalty=intercept_failure_penalty,
         rejected_beacon_penalty=rejected_beacon_penalty,
+        coverage_observation=coverage_observation,
     )

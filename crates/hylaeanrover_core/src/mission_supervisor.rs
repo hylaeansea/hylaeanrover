@@ -9,6 +9,7 @@
 use crate::minerals::element_catalog;
 use crate::observation::{MAX_VISIBLE_CUBES, OBS_DIM};
 use crate::reward::SCARCITY_WEIGHTS;
+use crate::survey_coverage::COVERAGE_FEATURE_DIM;
 
 const CUBE_OBS_START: usize = 15;
 const CUBE_OBS_WIDTH: usize = 3;
@@ -155,9 +156,20 @@ impl MissionSupervisor {
     /// at its training-time reserve threshold. `decide` continues to use the
     /// unmodified observation for low-power recovery.
     pub fn policy_observation(&self, observation: &[f32]) -> Vec<f32> {
+        self.policy_observation_with_coverage(observation, None)
+    }
+
+    pub fn policy_observation_with_coverage(
+        &self,
+        observation: &[f32],
+        coverage_features: Option<&[f32; COVERAGE_FEATURE_DIM]>,
+    ) -> Vec<f32> {
         let mut policy_observation = observation.to_vec();
         if policy_observation.len() > POWER_OBS_INDEX {
             policy_observation[CUBE_OBS_START..POWER_OBS_INDEX].fill(0.0);
+            if let Some(features) = coverage_features {
+                policy_observation[CUBE_OBS_START..POWER_OBS_INDEX].copy_from_slice(features);
+            }
             policy_observation[POWER_OBS_INDEX] = 1.0;
         }
         policy_observation

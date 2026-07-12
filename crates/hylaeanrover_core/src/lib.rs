@@ -23,6 +23,7 @@ pub mod observation;
 pub mod power_cubes;
 pub mod reward;
 pub mod rover;
+pub mod survey_coverage;
 pub mod telemetry;
 pub mod terrain;
 pub mod terrain_controls;
@@ -152,6 +153,7 @@ impl Plugin for RoverCorePlugin {
         .add_plugins(beacons::BeaconsPlugin)
         .add_plugins(minerals::MineralsPlugin)
         .add_plugins(imu::ImuPlugin)
+        .add_plugins(survey_coverage::SurveyCoveragePlugin)
         .add_plugins(reward::RewardPlugin)
         .add_plugins(game_state::GameStatePlugin)
         .add_plugins(telemetry::TelemetryPlugin)

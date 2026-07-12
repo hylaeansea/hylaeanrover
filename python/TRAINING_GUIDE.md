@@ -846,6 +846,31 @@ Stage 2 can pass when:
 
 ## 18. Promote Stage 2
 
+### Coverage-aware Stage 2 candidate
+
+The accepted non-coverage minerals bundle remains the fallback. Create a
+coverage candidate by warm-starting it once with the repurposed observation
+columns reset:
+
+```bash
+python examples/train.py \
+  --stage minerals --timesteps 1000000 \
+  --load ../models/minerals/model.zip \
+  --vecnorm ../models/minerals/vecnorm.pkl \
+  --scenario minerals_coverage \
+  --train-scenarios minerals_coverage,minerals_sparse,minerals_transition,minerals_fixed_2_sparse,no_cube_control \
+  --n-envs 5 --frame-skip 4 \
+  --mission-supervisor --coverage-observation \
+  --reset-coverage-inputs --reset-reward-stats \
+  --save runs/stage2_minerals_coverage
+```
+
+Matched evaluation must improve novel distance per 100 m by at least 30%,
+keep revisit rate at or below 30%, retain at least 90% of mineral score, keep
+forced-visible pickups at or above 0.70, and stay at 0% out-of-power with no
+more than 5% flips. Promote only after those gates pass, adding
+`--coverage-observation` to the normal promotion command.
+
 ```bash
 python examples/promote_model.py \
   --stage minerals \

@@ -57,6 +57,9 @@ def _env_kwargs_from_args(args: argparse.Namespace) -> dict[str, Any]:
     cfg["tilt_penalty"] = args.tilt_penalty
     cfg["tilt_threshold_deg"] = args.tilt_threshold_deg
     cfg["mission_supervisor"] = args.mission_supervisor
+    cfg["coverage_observation"] = bool(
+        args.coverage_observation or cfg.get("coverage_observation", False)
+    )
     cfg["supervisor_low_power_enter_fraction"] = (
         args.supervisor_low_power_enter_fraction
     )
@@ -157,17 +160,27 @@ def _episode_metrics(
     tracker_metrics: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     reason = info.get("game_over") or ("truncated" if truncated else "unknown")
+    distance = float(info.get("reward_distance", 0.0))
+    novel_distance = float(info.get("reward_novel_distance", 0.0))
     metrics = {
         "return": ep_return,
         "length": ep_len,
         "reason": reason,
-        "distance": float(info.get("reward_distance", 0.0)),
+        "distance": distance,
         "cube_bonus": float(info.get("reward_cube_bonus", 0.0)),
         # Per-episode pickup count, explicitly diffed by the caller against
         # the cumulative `cube_pickups` info key (which is process-lifetime
         # cumulative, not per-episode — see hylaeanrover_py's make_info()).
         "cube_pickups": cube_pickups,
         "mineral": float(info.get("reward_mineral_integral", 0.0)),
+        "novel_distance": novel_distance,
+        "novel_distance_per_100m": (
+            0.0 if distance <= 0.0 else novel_distance / distance * 100.0
+        ),
+        "novel_mineral": float(info.get("reward_novel_mineral_integral", 0.0)),
+        "coverage_cells": float(info.get("coverage_unique_cells", 0.0)),
+        "coverage_area_m2": float(info.get("coverage_area_m2", 0.0)),
+        "coverage_revisit_rate": float(info.get("coverage_revisit_rate", 0.0)),
         "beacon_bonus": float(info.get("reward_beacon_bonus", 0.0)),
         "beacons_used": BEACON_BUDGET
         - int(info.get("beacons_remaining", BEACON_BUDGET)),
@@ -332,6 +345,11 @@ def summarize(label: str, eps: list[dict[str, Any]]) -> None:
         f"  length        mean={arr('length').mean():10.1f}  std={arr('length').std():8.1f}"
     )
     print(f"  distance      mean={arr('distance').mean():10.2f}")
+    print(f"  novel_dist    mean={arr('novel_distance').mean():10.2f}")
+    print(f"  novel/100m    mean={arr('novel_distance_per_100m').mean():10.2f}")
+    print(f"  coverage_cell mean={arr('coverage_cells').mean():10.2f}")
+    print(f"  coverage_m2   mean={arr('coverage_area_m2').mean():10.2f}")
+    print(f"  revisit_rate  mean={arr('coverage_revisit_rate').mean():10.2%}")
     print(f"  cube_bonus    mean={arr('cube_bonus').mean():10.2f}")
     print(f"  cube_pickups  mean={arr('cube_pickups').mean():10.2f}")
     print(f"  end_power     mean={arr('end_power_frac').mean():10.2f}")
@@ -346,6 +364,7 @@ def summarize(label: str, eps: list[dict[str, Any]]) -> None:
     print(f"  sup_beacon_ok  mean={arr('supervisor_beacon_deploy_steps').mean():10.2f}")
     print(f"  sup_beacon_hold mean={arr('supervisor_beacon_hold_steps').mean():9.2f}")
     print(f"  mineral       mean={arr('mineral').mean():10.2f}")
+    print(f"  novel_mineral mean={arr('novel_mineral').mean():10.2f}")
     print(f"  beacon_bonus  mean={arr('beacon_bonus').mean():10.2f}")
     print(f"  beacons_used  mean={arr('beacons_used').mean():10.2f}")
     print(f"  flip_rate     {reasons.get('flipped', 0) / n:.2%}")
@@ -427,6 +446,11 @@ def main() -> None:
     p.add_argument("--tilt-penalty", type=float, default=0.0)
     p.add_argument("--tilt-threshold-deg", type=float, default=45.0)
     p.add_argument("--mission-supervisor", action="store_true")
+    p.add_argument(
+        "--coverage-observation",
+        action="store_true",
+        help="replace PPO cube slots with coverage_v1 frontier features",
+    )
     p.add_argument("--supervisor-low-power-enter-fraction", type=float, default=0.35)
     p.add_argument("--supervisor-low-power-exit-fraction", type=float, default=0.40)
     p.add_argument("--supervisor-path-safety-factor", type=float, default=1.10)

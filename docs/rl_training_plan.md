@@ -249,6 +249,13 @@ Dir: `python/` (add extras as needed: `tensorboard`).
    The supervisor alone receives raw cube/power state and owns survival.
 12. Watch `tensorboard --logdir runs/` for `rollout/ep_rew_mean` and
    `ep_len_mean` rising.
+13. Train map-aware mineral exploration as a separate `coverage_v1` candidate.
+   The core keeps a fixed 990 x 990 byte grid of 5 m cells per game and emits
+   18 egocentric frontier features through PPO's supervisor-hidden cube slots,
+   preserving `OBS_DIM=41`. Warm-start the accepted minerals policy, zero the
+   repurposed input columns once, reset only their normalization plus reward
+   normalization, and keep the promoted baseline until matched coverage,
+   mineral, pickup, and terminal-failure gates pass.
 
 ## Files to modify
 

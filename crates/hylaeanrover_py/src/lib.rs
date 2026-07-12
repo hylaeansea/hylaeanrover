@@ -44,6 +44,7 @@ use hylaeanrover_core::power_cubes::{
     ForcedPowerCubeSpawn, PowerCubeRng, PowerState, RelaunchEvent,
 };
 use hylaeanrover_core::reward::{BEACON_BUDGET, RewardState};
+use hylaeanrover_core::survey_coverage::{COVERAGE_FEATURE_DIM, SurveyCoverage};
 use hylaeanrover_core::telemetry::RoverTelemetry;
 use hylaeanrover_core::terrain_controls::TerrainState;
 use hylaeanrover_core::{ChassisEntity, RoverAction, RoverCoreConfig, RoverCorePlugin};
@@ -190,14 +191,32 @@ impl MissionSupervisor {
         self.inner.borrow_mut().reset();
     }
 
-    fn policy_observation(&self, observation: Vec<f32>) -> PyResult<Vec<f32>> {
+    #[pyo3(signature = (observation, coverage_features = None))]
+    fn policy_observation(
+        &self,
+        observation: Vec<f32>,
+        coverage_features: Option<Vec<f32>>,
+    ) -> PyResult<Vec<f32>> {
         if observation.len() != OBS_DIM {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "observation length {} != OBS_DIM {OBS_DIM}",
                 observation.len()
             )));
         }
-        Ok(self.inner.borrow().policy_observation(&observation))
+        let coverage = coverage_features
+            .map(|features| {
+                features.try_into().map_err(|features: Vec<f32>| {
+                    pyo3::exceptions::PyValueError::new_err(format!(
+                        "coverage feature length {} != {COVERAGE_FEATURE_DIM}",
+                        features.len()
+                    ))
+                })
+            })
+            .transpose()?;
+        Ok(self
+            .inner
+            .borrow()
+            .policy_observation_with_coverage(&observation, coverage.as_ref()))
     }
 
     #[pyo3(signature = (observation, proposed_action, power_capacity_wh, distance_m = 0.0))]
@@ -665,6 +684,14 @@ impl RoverEnv {
             }
         }
 
+        // Warm-up/settling motion is outside the policy episode and must not
+        // consume survey novelty before the first observation is returned.
+        inner
+            .app
+            .world_mut()
+            .resource_mut::<SurveyCoverage>()
+            .reset();
+
         inner.step_count = 0;
         inner.last_total_reward = inner.app.world().resource::<RewardState>().total();
 
@@ -734,6 +761,7 @@ fn make_info(inner: &EnvInner) -> String {
             .unwrap_or(serde_json::Value::Null),
     );
     let reward = world.resource::<RewardState>();
+    let coverage = world.resource::<SurveyCoverage>();
     map.insert(
         "reward_total".into(),
         serde_json::Value::from(reward.total()),
@@ -753,6 +781,49 @@ fn make_info(inner: &EnvInner) -> String {
     map.insert(
         "reward_cube_bonus".into(),
         serde_json::Value::from(reward.cube_bonus),
+    );
+    map.insert(
+        "coverage_unique_cells".into(),
+        serde_json::Value::from(coverage.unique_cells),
+    );
+    map.insert(
+        "coverage_area_m2".into(),
+        serde_json::Value::from(coverage.covered_area_m2()),
+    );
+    map.insert(
+        "coverage_revisit_entries".into(),
+        serde_json::Value::from(coverage.revisit_entries),
+    );
+    map.insert(
+        "coverage_revisit_rate".into(),
+        serde_json::Value::from(coverage.revisit_rate()),
+    );
+    map.insert(
+        "reward_novel_distance".into(),
+        serde_json::Value::from(coverage.novel_distance_m),
+    );
+    map.insert(
+        "reward_novel_mineral_integral".into(),
+        serde_json::Value::from(coverage.novel_mineral_integral),
+    );
+    let coverage_features = world
+        .resource::<ChassisEntity>()
+        .0
+        .and_then(|entity| world.get::<GlobalTransform>(entity))
+        .map(|transform| {
+            let position = transform.translation();
+            let heading = world.resource::<RoverTelemetry>().imu.heading_deg;
+            coverage.frontier_features(Vec2::new(position.x, position.z), heading)
+        })
+        .unwrap_or([0.0; COVERAGE_FEATURE_DIM]);
+    map.insert(
+        "coverage_features".into(),
+        serde_json::Value::Array(
+            coverage_features
+                .into_iter()
+                .map(serde_json::Value::from)
+                .collect(),
+        ),
     );
     map.insert(
         "beacons_remaining".into(),

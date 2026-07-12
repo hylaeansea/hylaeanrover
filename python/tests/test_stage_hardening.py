@@ -66,6 +66,11 @@ class StageHardeningPresetTests(unittest.TestCase):
         self.assertGreater(STAGE_WEIGHTS["minerals"]["distance"], 0.0)
         self.assertGreater(STAGE_WEIGHTS["minerals"]["mineral"], 0.0)
 
+    def test_coverage_scenario_enables_versioned_observation(self) -> None:
+        cfg = apply_scenario_defaults("minerals_coverage")
+        self.assertTrue(cfg["coverage_observation"])
+        self.assertEqual(cfg["cube_spawn_preset"], "sparse_game")
+
     def test_scenario_defaults_can_be_overridden(self) -> None:
         cfg = apply_scenario_defaults(
             "low_power_start",
@@ -401,6 +406,9 @@ class _OneStepEnv(gym.Env):
         episode_cube_pickups: float = 0.0,
         game_over: str | None = None,
         reset_power_frac: float = 1.0,
+        novel_distance: float = 0.0,
+        novel_mineral: float = 0.0,
+        supervisor_mode: str | None = None,
     ) -> None:
         self.distance = distance
         self.power_frac = power_frac
@@ -408,6 +416,9 @@ class _OneStepEnv(gym.Env):
         self.episode_cube_pickups = episode_cube_pickups
         self.game_over = game_over
         self.reset_power_frac = reset_power_frac
+        self.novel_distance = novel_distance
+        self.novel_mineral = novel_mineral
+        self.supervisor_mode = supervisor_mode
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
@@ -416,6 +427,8 @@ class _OneStepEnv(gym.Env):
             "reward_cube_bonus": 0.0,
             "reward_mineral_integral": 0.0,
             "reward_beacon_bonus": 0.0,
+            "reward_novel_distance": 0.0,
+            "reward_novel_mineral_integral": 0.0,
             "power_frac": self.reset_power_frac,
         }
 
@@ -430,9 +443,12 @@ class _OneStepEnv(gym.Env):
                 "reward_cube_bonus": self.cube_bonus,
                 "reward_mineral_integral": 0.0,
                 "reward_beacon_bonus": 0.0,
+                "reward_novel_distance": self.novel_distance,
+                "reward_novel_mineral_integral": self.novel_mineral,
                 "power_frac": self.power_frac,
                 "episode_cube_pickups": self.episode_cube_pickups,
                 "game_over": self.game_over,
+                "supervisor_mode": self.supervisor_mode,
             },
         )
 
@@ -494,11 +510,23 @@ class _SupervisorEnv(gym.Env):
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
         self.last_action = None
-        return self._obs(), {"reward_distance": self.distance_m}
+        return self._obs(), {
+            "reward_distance": self.distance_m,
+            "coverage_features": [index / 18.0 for index in range(18)],
+        }
 
     def step(self, action):
         self.last_action = int(action)
-        return self._obs(), 0.0, False, False, {"reward_distance": self.distance_m}
+        return (
+            self._obs(),
+            0.0,
+            False,
+            False,
+            {
+                "reward_distance": self.distance_m,
+                "coverage_features": [index / 18.0 for index in range(18)],
+            },
+        )
 
 
 class MissionSupervisorWrapperTests(unittest.TestCase):
@@ -529,6 +557,25 @@ class MissionSupervisorWrapperTests(unittest.TestCase):
 
         obs, _, _, _, _ = env.step(7)
         self.assertTrue(np.all(obs[CUBE_OBS_START:POWER_OBS_INDEX] == 0.0))
+
+    def test_coverage_policy_sees_frontier_features_while_supervisor_keeps_cube(
+        self,
+    ) -> None:
+        base = _SupervisorEnv(power_frac=0.30, cube=(15.0, 30.0))
+        env = MissionSupervisorWrapper(
+            base,
+            power_capacity_wh=100.0,
+            coverage_observation=True,
+        )
+        obs, _ = env.reset()
+        np.testing.assert_allclose(
+            obs[CUBE_OBS_START:POWER_OBS_INDEX],
+            np.asarray([index / 18.0 for index in range(18)], dtype=np.float32),
+        )
+        _, _, _, _, info = env.step(4)
+        self.assertEqual(info["supervisor_mode"], "intercept")
+        self.assertEqual(base.last_action, 6)
+        self.assertEqual(obs[POWER_OBS_INDEX], np.float32(1.0))
 
     def test_mid_power_remains_in_exploration_mode(self) -> None:
         base = _SupervisorEnv(power_frac=0.40)
@@ -613,6 +660,39 @@ class _TiltEnv(_OneStepEnv):
 
 
 class LocomotionPowerShapingTests(unittest.TestCase):
+    def test_coverage_reward_pays_new_ground_once_without_repeat_penalty(self) -> None:
+        env = StagedRewardWrapper(
+            _OneStepEnv(
+                distance=10.0,
+                power_frac=1.0,
+                novel_distance=10.0,
+                novel_mineral=20.0,
+            ),
+            stage="minerals",
+            coverage_observation=True,
+        )
+        env.reset()
+        _, first_reward, _, _, _ = env.step(7)
+        _, repeat_reward, _, _, _ = env.step(7)
+        self.assertAlmostEqual(first_reward, 30.0)
+        self.assertEqual(repeat_reward, 0.0)
+
+    def test_coverage_reward_is_not_attributed_to_supervisor_motion(self) -> None:
+        env = StagedRewardWrapper(
+            _OneStepEnv(
+                distance=10.0,
+                power_frac=0.30,
+                novel_distance=10.0,
+                novel_mineral=20.0,
+                supervisor_mode="intercept",
+            ),
+            stage="minerals",
+            coverage_observation=True,
+        )
+        env.reset()
+        _, reward, _, _, _ = env.step(7)
+        self.assertAlmostEqual(reward, 1.0)
+
     def test_tilt_shaping_ignores_normal_terrain_attitude(self) -> None:
         env = StagedRewardWrapper(
             _TiltEnv(pitch=30.0, roll=-40.0),
