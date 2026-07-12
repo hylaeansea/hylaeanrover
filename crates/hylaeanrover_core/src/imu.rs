@@ -34,11 +34,11 @@ use crate::{ChassisEntity, ROVER_GROUP};
 
 // Re-use the same neon-on-dark styling the other left-side panels use so
 // this slots in visually without a fresh palette.
-const PANEL_BG: Color = Color::srgba(0.03, 0.05, 0.08, 0.82);
-const PANEL_EDGE: Color = Color::srgba(0.10, 0.90, 0.95, 0.45);
-const TEXT_MAIN: Color = Color::srgba(0.85, 0.95, 1.00, 1.0);
-const TEXT_ACCENT: Color = Color::srgba(0.40, 1.00, 1.00, 1.0);
-const TEXT_DIM: Color = Color::srgba(0.55, 0.65, 0.75, 0.9);
+pub(crate) const PANEL_BG: Color = Color::srgba(0.03, 0.05, 0.08, 0.82);
+pub(crate) const PANEL_EDGE: Color = Color::srgba(0.10, 0.90, 0.95, 0.45);
+pub(crate) const TEXT_MAIN: Color = Color::srgba(0.85, 0.95, 1.00, 1.0);
+pub(crate) const TEXT_ACCENT: Color = Color::srgba(0.40, 1.00, 1.00, 1.0);
+pub(crate) const TEXT_DIM: Color = Color::srgba(0.55, 0.65, 0.75, 0.9);
 
 // ---- Marker components ----------------------------------------------------
 
@@ -169,7 +169,7 @@ fn setup_imu_ui(
         });
 }
 
-fn divider(panel: &mut ChildSpawnerCommands) {
+pub(crate) fn divider(panel: &mut ChildSpawnerCommands) {
     panel.spawn((
         Node {
             height: Val::Px(1.0),
@@ -181,7 +181,7 @@ fn divider(panel: &mut ChildSpawnerCommands) {
     ));
 }
 
-fn subheader(panel: &mut ChildSpawnerCommands, ui_font: &UiFont, label: &str) {
+pub(crate) fn subheader(panel: &mut ChildSpawnerCommands, ui_font: &UiFont, label: &str) {
     panel.spawn((
         Node {
             margin: UiRect::top(Val::Px(4.0)),

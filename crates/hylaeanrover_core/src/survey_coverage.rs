@@ -85,6 +85,16 @@ impl SurveyCoverage {
         Some((coordinate(position.x), coordinate(position.y)))
     }
 
+    /// Cells per grid side (the grid is square).
+    pub fn grid_width(&self) -> usize {
+        self.width
+    }
+
+    /// Visit count at grid cell (x, z); `None` outside the grid.
+    pub fn visit_at_cell(&self, x: usize, z: usize) -> Option<u8> {
+        (x < self.width && z < self.width).then(|| self.visits[self.index(x, z)])
+    }
+
     pub fn visit_count_at(&self, position: Vec2) -> u8 {
         self.cell_for_position(position)
             .map(|(x, z)| self.visits[self.index(x, z)])
@@ -285,6 +295,19 @@ mod tests {
             Some((989, 989))
         );
         assert_eq!(coverage.cell_for_position(Vec2::new(2475.1, 0.0)), None);
+    }
+
+    #[test]
+    fn cell_accessors_read_visits_and_reject_out_of_bounds() {
+        let mut coverage = SurveyCoverage::default();
+        assert_eq!(coverage.grid_width(), 990);
+        assert_eq!(coverage.visit_at_cell(0, 0), Some(0));
+        assert_eq!(coverage.visit_at_cell(990, 0), None);
+        assert_eq!(coverage.visit_at_cell(0, 990), None);
+
+        coverage.mark_position(Vec2::ZERO, |_| 1.0);
+        let (x, z) = coverage.cell_for_position(Vec2::ZERO).unwrap();
+        assert_eq!(coverage.visit_at_cell(x, z), Some(1));
     }
 
     #[test]
