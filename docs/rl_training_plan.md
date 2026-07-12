@@ -496,3 +496,21 @@ mid-training via the O key.
   - Promotion is blocked until no-shaping `sparse_visible_low_power` and
     `sparse_game` checks show pickup behavior; dense pickup success alone
     is not promotable.
+- 2026-07-12 — Coverage candidate trained, gate re-anchored, promoted:
+  - 1M-step `minerals_coverage` run warm-started from the promoted
+    minerals bundle (columns 15..32 reset, reward normalization reset).
+    Checkpoint selection picked the 500k `best`; the 1M final exceeded
+    the 5% flip gate (10% medium forced-cube, 20% long) and was rejected.
+  - Re-anchored the novelty gate from `novel_distance_per_100m` (+30%)
+    to unique cells per episode (+30% at matched power budget). The
+    per-100m ratio caps near 100 and the baseline already scores ~94 by
+    driving short non-retracing paths, so the old gate was unreachable
+    for any policy; the coverage benefit is total novel ground covered.
+  - Matched-seed results for `best` vs promoted baseline: unique cells
+    +32-107% (medium) and +88% (long 1 kWh sparse-game, 193 vs 103
+    cells), mineral score 155% of baseline (medium), revisit rate <=17%,
+    forced-visible pickups 8.1/episode, 0% out-of-power everywhere,
+    flips 5% medium ceiling / 0% long. Long no-cube behavior is
+    supervisor-owned and byte-identical between models.
+  - Promoted `runs/stage2_minerals_coverage/best` with
+    `--coverage-observation`; sidecar exports `coverage_version: 1`.

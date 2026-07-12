@@ -865,11 +865,20 @@ python examples/train.py \
   --save runs/stage2_minerals_coverage
 ```
 
-Matched evaluation must improve novel distance per 100 m by at least 30%,
-keep revisit rate at or below 30%, retain at least 90% of mineral score, keep
-forced-visible pickups at or above 0.70, and stay at 0% out-of-power with no
-more than 5% flips. Promote only after those gates pass, adding
-`--coverage-observation` to the normal promotion command.
+Matched evaluation must improve unique cells covered per episode by at least
+30% at a matched power budget, keep revisit rate at or below 30%, retain at
+least 90% of mineral score, keep forced-visible pickups at or above 0.70, and
+stay at 0% out-of-power with no more than 5% flips. Promote only after those
+gates pass, adding `--coverage-observation` to the normal promotion command.
+
+Do not gate on `novel_distance_per_100m`: the ratio is capped near 100 and a
+baseline that drives short distances without retracing already scores ~94, so
+a 30% relative improvement is unreachable for any policy. The coverage
+benefit appears as total novel ground covered per episode, not as per-meter
+novelty efficiency. (2026-07-12 matched-seed evaluation: the coverage `best`
+checkpoint improved unique cells +32-107% at medium horizon and +88% on the
+long 1 kWh sparse-game horizon while all other gates passed; the final 1M
+checkpoint exceeded the flip gate and was rejected.)
 
 ```bash
 python examples/promote_model.py \
