@@ -28,10 +28,10 @@ const REDRAW_SECONDS: f32 = 0.2;
 
 const OUT_OF_BOUNDS: [u8; 4] = [8, 10, 14, 255];
 const UNVISITED: [u8; 4] = [16, 24, 32, 255];
-const VISITED_LOW: [f32; 3] = [20.0, 80.0, 90.0];
-const VISITED_HIGH: [f32; 3] = [80.0, 230.0, 240.0];
+const VISITED_LOW: [f32; 3] = [24.0, 90.0, 100.0];
+const VISITED_HIGH: [f32; 3] = [235.0, 255.0, 255.0];
 /// Visit count at which the visited gradient saturates.
-const VISIT_SATURATION: u8 = 5;
+const VISIT_SATURATION: u8 = 4;
 const ROVER: [u8; 4] = [255, 190, 80, 255];
 
 #[derive(Resource)]
@@ -166,7 +166,9 @@ fn sync_survey_map(
 }
 
 fn visited_color(visits: u8) -> [u8; 4] {
-    let t = visits.min(VISIT_SATURATION) as f32 / VISIT_SATURATION as f32;
+    // Anchor a single visit at the dim end so the ramp only spends its
+    // range on revisits: 1 -> LOW, then even steps to HIGH at saturation.
+    let t = visits.min(VISIT_SATURATION).saturating_sub(1) as f32 / (VISIT_SATURATION - 1) as f32;
     let channel = |low: f32, high: f32| (low + (high - low) * t).round() as u8;
     [
         channel(VISITED_LOW[0], VISITED_HIGH[0]),
