@@ -9,6 +9,7 @@
 use crate::minerals::element_catalog;
 use crate::observation::{MAX_VISIBLE_CUBES, OBS_DIM};
 use crate::reward::SCARCITY_WEIGHTS;
+use crate::survey_coverage::COVERAGE_FEATURE_DIM;
 
 const CUBE_OBS_START: usize = 15;
 const CUBE_OBS_WIDTH: usize = 3;
@@ -20,6 +21,8 @@ pub const COAST_ACTION: u32 = 4;
 pub const FORWARD_ACTION: u32 = 7;
 pub const FORWARD_LEFT_ACTION: u32 = 6;
 pub const FORWARD_RIGHT_ACTION: u32 = 8;
+pub const REVERSE_LEFT_ACTION: u32 = 0;
+pub const REVERSE_RIGHT_ACTION: u32 = 2;
 
 #[derive(Clone, Copy, Debug)]
 pub struct MissionSupervisorConfig {
@@ -42,6 +45,10 @@ pub struct MissionSupervisorConfig {
     pub beacon_spacing_m: f32,
     pub beacon_auto_deploy: bool,
     pub beacon_surface_score_threshold: f32,
+    pub stuck_guard_enabled: bool,
+    pub stuck_speed_mps: f32,
+    pub stuck_enter_decisions: u32,
+    pub stuck_reverse_decisions: u32,
 }
 
 impl Default for MissionSupervisorConfig {
@@ -66,6 +73,10 @@ impl Default for MissionSupervisorConfig {
             beacon_spacing_m: 75.0,
             beacon_auto_deploy: true,
             beacon_surface_score_threshold: 150.0,
+            stuck_guard_enabled: true,
+            stuck_speed_mps: 0.2,
+            stuck_enter_decisions: 20,
+            stuck_reverse_decisions: 10,
         }
     }
 }
@@ -79,6 +90,7 @@ pub enum SupervisorMode {
     Stabilize,
     BeaconDeploy,
     BeaconHold,
+    StuckRecovery,
 }
 
 impl SupervisorMode {
@@ -91,6 +103,7 @@ impl SupervisorMode {
             Self::Stabilize => "stabilize",
             Self::BeaconDeploy => "beacon_deploy",
             Self::BeaconHold => "beacon_hold",
+            Self::StuckRecovery => "stuck_recovery",
         }
     }
 }
@@ -117,6 +130,10 @@ pub struct MissionSupervisor {
     last_beacon_distance_m: Option<f32>,
     last_power_wh: Option<f32>,
     recovery_rearm_wh: Option<f32>,
+    last_action: Option<u32>,
+    stuck_decisions: u32,
+    stuck_recovery_remaining: u32,
+    stuck_turn_right: bool,
 }
 
 impl MissionSupervisor {
@@ -130,6 +147,10 @@ impl MissionSupervisor {
             last_beacon_distance_m: None,
             last_power_wh: None,
             recovery_rearm_wh: None,
+            last_action: None,
+            stuck_decisions: 0,
+            stuck_recovery_remaining: 0,
+            stuck_turn_right: false,
         }
     }
 
@@ -145,6 +166,10 @@ impl MissionSupervisor {
         self.last_beacon_distance_m = None;
         self.last_power_wh = None;
         self.recovery_rearm_wh = None;
+        self.last_action = None;
+        self.stuck_decisions = 0;
+        self.stuck_recovery_remaining = 0;
+        self.stuck_turn_right = false;
     }
 
     /// Return the observation presented to the mission policy.
@@ -155,9 +180,20 @@ impl MissionSupervisor {
     /// at its training-time reserve threshold. `decide` continues to use the
     /// unmodified observation for low-power recovery.
     pub fn policy_observation(&self, observation: &[f32]) -> Vec<f32> {
+        self.policy_observation_with_coverage(observation, None)
+    }
+
+    pub fn policy_observation_with_coverage(
+        &self,
+        observation: &[f32],
+        coverage_features: Option<&[f32; COVERAGE_FEATURE_DIM]>,
+    ) -> Vec<f32> {
         let mut policy_observation = observation.to_vec();
         if policy_observation.len() > POWER_OBS_INDEX {
             policy_observation[CUBE_OBS_START..POWER_OBS_INDEX].fill(0.0);
+            if let Some(features) = coverage_features {
+                policy_observation[CUBE_OBS_START..POWER_OBS_INDEX].copy_from_slice(features);
+            }
             policy_observation[POWER_OBS_INDEX] = 1.0;
         }
         policy_observation
@@ -256,6 +292,62 @@ impl MissionSupervisor {
                 target.map(|(_, range)| range),
                 available_range_m,
             );
+        }
+
+        // Stuck guard: throttle applied but the rover is not moving —
+        // typically wedged against a fixed obstacle (e.g. a deployed
+        // beacon). The policy never sees these collisions in training
+        // (headless beacons have no collider), so recovery is
+        // deterministic: back away with steering to change heading,
+        // alternating turn direction across successive recoveries so a
+        // second wedge on the same obstacle is not approached the same
+        // way. Runs below the tilt guard, above everything else.
+        if self.config.stuck_guard_enabled {
+            let reverse_action = if self.stuck_turn_right {
+                REVERSE_RIGHT_ACTION
+            } else {
+                REVERSE_LEFT_ACTION
+            };
+            if self.stuck_recovery_remaining > 0 {
+                self.stuck_recovery_remaining -= 1;
+                return self.decision(
+                    reverse_action,
+                    proposed_action,
+                    SupervisorMode::StuckRecovery,
+                    target.is_some(),
+                    false,
+                    target.map(|(_, range)| range),
+                    available_range_m,
+                );
+            }
+            let throttled = self
+                .last_action
+                .is_some_and(|action| action < 9 && action / 3 != 1);
+            if throttled && speed_mps < self.config.stuck_speed_mps {
+                self.stuck_decisions += 1;
+                if self.stuck_decisions >= self.config.stuck_enter_decisions {
+                    self.stuck_decisions = 0;
+                    self.stuck_turn_right = !self.stuck_turn_right;
+                    self.stuck_recovery_remaining =
+                        self.config.stuck_reverse_decisions.saturating_sub(1);
+                    let reverse_action = if self.stuck_turn_right {
+                        REVERSE_RIGHT_ACTION
+                    } else {
+                        REVERSE_LEFT_ACTION
+                    };
+                    return self.decision(
+                        reverse_action,
+                        proposed_action,
+                        SupervisorMode::StuckRecovery,
+                        target.is_some(),
+                        false,
+                        target.map(|(_, range)| range),
+                        available_range_m,
+                    );
+                }
+            } else {
+                self.stuck_decisions = 0;
+            }
         }
 
         if !self.recovering {
@@ -366,7 +458,7 @@ impl MissionSupervisor {
 
     #[allow(clippy::too_many_arguments)]
     fn decision(
-        &self,
+        &mut self,
         action: u32,
         proposed_action: u32,
         mode: SupervisorMode,
@@ -375,6 +467,7 @@ impl MissionSupervisor {
         target_range_m: Option<f32>,
         available_range_m: f32,
     ) -> SupervisorDecision {
+        self.last_action = Some(action);
         SupervisorDecision {
             action,
             proposed_action,
@@ -580,6 +673,88 @@ mod tests {
         assert_eq!(crowded.action, COAST_ACTION);
         let spaced = supervisor.decide_with_context(&observation, 9, 100.0, 175.0);
         assert_eq!(spaced.action, 9);
+    }
+
+    #[test]
+    fn stuck_guard_reverses_after_throttled_decisions_without_motion() {
+        let config = MissionSupervisorConfig::default();
+        let mut supervisor = MissionSupervisor::new(config);
+        let mut stalled = obs(0.9, 0.0, 0.0, None);
+        stalled[0] = 0.0;
+
+        // First decision records the executed forward action; the
+        // counter then needs `stuck_enter_decisions` stalled decisions.
+        for _ in 0..config.stuck_enter_decisions {
+            let decision = supervisor.decide(&stalled, FORWARD_ACTION, 100.0);
+            assert_eq!(decision.mode, SupervisorMode::Explore);
+        }
+        let recovery = supervisor.decide(&stalled, FORWARD_ACTION, 100.0);
+        assert_eq!(recovery.mode, SupervisorMode::StuckRecovery);
+        assert_eq!(recovery.action, REVERSE_RIGHT_ACTION);
+        assert!(recovery.overrode);
+
+        for _ in 1..config.stuck_reverse_decisions {
+            let decision = supervisor.decide(&stalled, FORWARD_ACTION, 100.0);
+            assert_eq!(decision.mode, SupervisorMode::StuckRecovery);
+            assert_eq!(decision.action, REVERSE_RIGHT_ACTION);
+        }
+        let released = supervisor.decide(&stalled, FORWARD_ACTION, 100.0);
+        assert_eq!(released.mode, SupervisorMode::Explore);
+        assert_eq!(released.action, FORWARD_ACTION);
+    }
+
+    #[test]
+    fn stuck_guard_alternates_turn_direction_across_recoveries() {
+        let config = MissionSupervisorConfig::default();
+        let mut supervisor = MissionSupervisor::new(config);
+        let mut stalled = obs(0.9, 0.0, 0.0, None);
+        stalled[0] = 0.0;
+
+        let mut modes = Vec::new();
+        for _ in 0..200 {
+            let decision = supervisor.decide(&stalled, FORWARD_ACTION, 100.0);
+            if decision.mode == SupervisorMode::StuckRecovery {
+                modes.push(decision.action);
+            }
+        }
+        assert!(modes.contains(&REVERSE_RIGHT_ACTION));
+        assert!(modes.contains(&REVERSE_LEFT_ACTION));
+    }
+
+    #[test]
+    fn stuck_guard_ignores_stationary_coasting() {
+        let mut supervisor = MissionSupervisor::new(MissionSupervisorConfig::default());
+        let mut parked = obs(0.9, 0.0, 0.0, None);
+        parked[0] = 0.0;
+        for _ in 0..100 {
+            let decision = supervisor.decide(&parked, COAST_ACTION, 100.0);
+            assert_eq!(decision.mode, SupervisorMode::Explore);
+            assert_eq!(decision.action, COAST_ACTION);
+        }
+    }
+
+    #[test]
+    fn stuck_guard_does_not_trigger_while_moving() {
+        let mut supervisor = MissionSupervisor::new(MissionSupervisorConfig::default());
+        let moving = obs(0.9, 0.0, 0.0, None);
+        for _ in 0..100 {
+            let decision = supervisor.decide(&moving, FORWARD_ACTION, 100.0);
+            assert_eq!(decision.mode, SupervisorMode::Explore);
+        }
+    }
+
+    #[test]
+    fn stuck_guard_state_clears_on_reset() {
+        let config = MissionSupervisorConfig::default();
+        let mut supervisor = MissionSupervisor::new(config);
+        let mut stalled = obs(0.9, 0.0, 0.0, None);
+        stalled[0] = 0.0;
+        for _ in 0..=config.stuck_enter_decisions {
+            supervisor.decide(&stalled, FORWARD_ACTION, 100.0);
+        }
+        supervisor.reset();
+        let decision = supervisor.decide(&stalled, FORWARD_ACTION, 100.0);
+        assert_eq!(decision.mode, SupervisorMode::Explore);
     }
 
     #[test]

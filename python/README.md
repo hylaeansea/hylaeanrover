@@ -456,6 +456,34 @@ strategic beacon placement. Early or crowded policy requests are converted to
 coast and receive a small training penalty; in-game deployment uses the same
 guard and automatic placement rule.
 
+## Coverage-aware mineral exploration
+
+`coverage_v1` gives mineral/full policies per-game survey memory without
+changing `OBS_DIM=41`. The shared core stores one saturating byte per 5 m cell
+over the 4.95 km arena (990 x 990, about 1 MB), resets it on relaunch, and
+reuses PPO's supervisor-hidden cube slots for 18 rover-relative frontier
+features. The supervisor still receives raw cube and power observations.
+
+Coverage training pays `0.1` raw distance, `0.9` first-visit distance, and
+first-visit mineral integral. Repeated ground receives no mineral/coverage
+reward and no explicit penalty. Bootstrap from the promoted minerals model:
+
+```bash
+python examples/train.py --stage minerals --timesteps 1000000 \
+  --load ../models/minerals/model.zip \
+  --vecnorm ../models/minerals/vecnorm.pkl \
+  --scenario minerals_coverage \
+  --train-scenarios minerals_coverage,minerals_sparse,minerals_transition,minerals_fixed_2_sparse,no_cube_control \
+  --n-envs 5 --frame-skip 4 --mission-supervisor \
+  --coverage-observation --reset-coverage-inputs --reset-reward-stats \
+  --save runs/stage2_minerals_coverage
+```
+
+Use `--reset-coverage-inputs` only on the first transition into coverage_v1.
+Same-candidate continuations keep the learned input weights and use
+`--preserve-reward-stats`. Evaluation reports unique cells, covered area,
+revisit rate, novel distance per 100 m, and novel mineral integral.
+
 ## Reward
 
 `step_reward = total_reward_now − total_reward_last_step` — purely

@@ -83,6 +83,42 @@ _STAGE_HINT_PATTERNS = {
     "full": (r"(^|[/_.-])(stage3|stage_3|full)($|[/_.-])",),
 }
 
+COVERAGE_OBS_SLICE = slice(15, 33)
+
+
+def _pin_coverage_normalization(vecnorm: VecNormalize) -> None:
+    vecnorm.obs_rms.mean[COVERAGE_OBS_SLICE] = 0.0
+    vecnorm.obs_rms.var[COVERAGE_OBS_SLICE] = 1.0
+
+
+def _reset_coverage_policy_inputs(model: PPO) -> None:
+    layers = (
+        model.policy.mlp_extractor.policy_net[0],
+        model.policy.mlp_extractor.value_net[0],
+    )
+    for layer in layers:
+        if (
+            not isinstance(layer, th.nn.Linear)
+            or layer.in_features != hylaeanrover.OBS_DIM
+        ):
+            raise SystemExit(
+                "coverage bootstrap requires the standard 41-input MLP policy"
+            )
+        with th.no_grad():
+            layer.weight[:, COVERAGE_OBS_SLICE].zero_()
+        state = model.policy.optimizer.state.get(layer.weight, {})
+        for value in state.values():
+            if isinstance(value, th.Tensor) and value.shape == layer.weight.shape:
+                value[:, COVERAGE_OBS_SLICE].zero_()
+
+
+class CoverageNormalizationCallback(BaseCallback):
+    def _on_step(self) -> bool:
+        vecnorm = self.model.get_vec_normalize_env()
+        if vecnorm is not None:
+            _pin_coverage_normalization(vecnorm)
+        return True
+
 
 class SaveBestVecNormalize(BaseCallback):
     """Save the training VecNormalize stats whenever EvalCallback finds a
@@ -290,6 +326,8 @@ class EpisodeOutcomeCallback(BaseCallback):
         self._counts: Counter[str] = Counter()
         self._end_power: list[float] = []
         self._cube_bonus: list[float] = []
+        self._coverage_cells: list[float] = []
+        self._coverage_revisit_rate: list[float] = []
 
     def _on_step(self) -> bool:
         for done, info in zip(self.locals["dones"], self.locals["infos"]):
@@ -305,6 +343,10 @@ class EpisodeOutcomeCallback(BaseCallback):
                 self._end_power.append(float(info["power_frac"]))
             if "reward_cube_bonus" in info:
                 self._cube_bonus.append(float(info["reward_cube_bonus"]))
+            if "coverage_unique_cells" in info:
+                self._coverage_cells.append(float(info["coverage_unique_cells"]))
+            if "coverage_revisit_rate" in info:
+                self._coverage_revisit_rate.append(float(info["coverage_revisit_rate"]))
         return True
 
     def _on_rollout_end(self) -> None:
@@ -321,9 +363,20 @@ class EpisodeOutcomeCallback(BaseCallback):
             self.logger.record(
                 "episodes/mean_cube_bonus", float(np.mean(self._cube_bonus))
             )
+        if self._coverage_cells:
+            self.logger.record(
+                "episodes/coverage_unique_cells", float(np.mean(self._coverage_cells))
+            )
+        if self._coverage_revisit_rate:
+            self.logger.record(
+                "episodes/coverage_revisit_rate",
+                float(np.mean(self._coverage_revisit_rate)),
+            )
         self._counts.clear()
         self._end_power.clear()
         self._cube_bonus.clear()
+        self._coverage_cells.clear()
+        self._coverage_revisit_rate.clear()
 
 
 def _env_thunk(
@@ -436,6 +489,9 @@ def _env_kwargs_from_args(
     cfg["tilt_penalty"] = args.tilt_penalty
     cfg["tilt_threshold_deg"] = args.tilt_threshold_deg
     cfg["mission_supervisor"] = args.mission_supervisor
+    cfg["coverage_observation"] = bool(
+        args.coverage_observation or cfg.get("coverage_observation", False)
+    )
     cfg["supervisor_low_power_enter_fraction"] = (
         args.supervisor_low_power_enter_fraction
     )
@@ -912,6 +968,16 @@ def main() -> None:
         action="store_true",
         help="apply the shared reachability/intercept/tilt supervisor",
     )
+    p.add_argument(
+        "--coverage-observation",
+        action="store_true",
+        help="replace PPO cube slots with coverage_v1 frontier features",
+    )
+    p.add_argument(
+        "--reset-coverage-inputs",
+        action="store_true",
+        help="zero repurposed input weights and reset slots 15..32 normalization",
+    )
     p.add_argument("--supervisor-low-power-enter-fraction", type=float, default=0.35)
     p.add_argument("--supervisor-low-power-exit-fraction", type=float, default=0.40)
     p.add_argument("--supervisor-path-safety-factor", type=float, default=1.10)
@@ -1142,6 +1208,12 @@ def main() -> None:
         raise SystemExit(
             "--teacher-pretrain-only requires --teacher-pretrain-samples > 0"
         )
+    if args.coverage_observation and not args.mission_supervisor:
+        raise SystemExit("--coverage-observation requires --mission-supervisor")
+    if args.reset_coverage_inputs and not (args.coverage_observation and args.load):
+        raise SystemExit(
+            "--reset-coverage-inputs requires --coverage-observation and --load"
+        )
 
     os.makedirs(args.save, exist_ok=True)
     env_kwargs = _env_kwargs_from_args(args)
@@ -1188,6 +1260,8 @@ def main() -> None:
         venv.norm_reward = True
         if reset_reward_stats:
             venv.ret_rms = RunningMeanStd(shape=())
+        if args.coverage_observation:
+            _pin_coverage_normalization(venv)
         venv.returns = np.zeros(venv.num_envs)
         reward_status = "reset" if reset_reward_stats else "preserved"
         print(
@@ -1196,6 +1270,8 @@ def main() -> None:
         )
     else:
         venv = VecNormalize(base, norm_obs=True, norm_reward=True, clip_obs=10.0)
+        if args.coverage_observation:
+            _pin_coverage_normalization(venv)
 
     # --- Eval env (separate, single process; EvalCallback syncs obs stats) -
     eval_venv = VecNormalize(
@@ -1258,6 +1334,9 @@ def main() -> None:
             target_kl=args.target_kl,
         )
         print(f"Warm-started policy from {args.load}")
+        if args.reset_coverage_inputs:
+            _reset_coverage_policy_inputs(model)
+            print("Reset policy/value input columns 15..32 for coverage_v1")
     else:
         model = PPO(
             "MlpPolicy",
@@ -1307,6 +1386,8 @@ def main() -> None:
             additional_selection_envs=selection_extra_envs,
         ),
     ]
+    if args.coverage_observation:
+        callbacks.insert(0, CoverageNormalizationCallback())
 
     for scenario in [
         s.strip() for s in args.extra_eval_scenarios.split(",") if s.strip()

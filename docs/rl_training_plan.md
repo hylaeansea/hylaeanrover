@@ -249,6 +249,13 @@ Dir: `python/` (add extras as needed: `tensorboard`).
    The supervisor alone receives raw cube/power state and owns survival.
 12. Watch `tensorboard --logdir runs/` for `rollout/ep_rew_mean` and
    `ep_len_mean` rising.
+13. Train map-aware mineral exploration as a separate `coverage_v1` candidate.
+   The core keeps a fixed 990 x 990 byte grid of 5 m cells per game and emits
+   18 egocentric frontier features through PPO's supervisor-hidden cube slots,
+   preserving `OBS_DIM=41`. Warm-start the accepted minerals policy, zero the
+   repurposed input columns once, reset only their normalization plus reward
+   normalization, and keep the promoted baseline until matched coverage,
+   mineral, pickup, and terminal-failure gates pass.
 
 ## Files to modify
 
@@ -489,3 +496,50 @@ mid-training via the O key.
   - Promotion is blocked until no-shaping `sparse_visible_low_power` and
     `sparse_game` checks show pickup behavior; dense pickup success alone
     is not promotable.
+- 2026-07-12 — Coverage candidate trained, gate re-anchored, promoted:
+  - 1M-step `minerals_coverage` run warm-started from the promoted
+    minerals bundle (columns 15..32 reset, reward normalization reset).
+    Checkpoint selection picked the 500k `best`; the 1M final exceeded
+    the 5% flip gate (10% medium forced-cube, 20% long) and was rejected.
+  - Re-anchored the novelty gate from `novel_distance_per_100m` (+30%)
+    to unique cells per episode (+30% at matched power budget). The
+    per-100m ratio caps near 100 and the baseline already scores ~94 by
+    driving short non-retracing paths, so the old gate was unreachable
+    for any policy; the coverage benefit is total novel ground covered.
+  - Matched-seed results for `best` vs promoted baseline: unique cells
+    +32-107% (medium) and +88% (long 1 kWh sparse-game, 193 vs 103
+    cells), mineral score 155% of baseline (medium), revisit rate <=17%,
+    forced-visible pickups 8.1/episode, 0% out-of-power everywhere,
+    flips 5% medium ceiling / 0% long. Long no-cube behavior is
+    supervisor-owned and byte-identical between models.
+  - Promoted `runs/stage2_minerals_coverage/best` with
+    `--coverage-observation`; sidecar exports `coverage_version: 1`.
+- 2026-07-12 — Full-stage promotion of the coverage policy (no Stage 3 PPO):
+  - Re-baselined the full stage at seed 2000 (100 episodes, medium,
+    frame-skip 4): the July hierarchical table is stale post framework
+    reset (old full bundle now measures 6537/3696 minerals and 0.85/0.18
+    pickups on transition/sparse, vs the recorded 7468/4884, 4.15/0.37).
+  - Coverage policy + hierarchical beacon controller beats the old full
+    bundle on the same seeds: minerals +10%/+12%, unique cells +63%/+25%,
+    pickups and beacon usage up, flips <=2%, 0% out-of-power. Known
+    trade: transition beacon bonus -17% (beacons deployed on fresher,
+    lower-scoring ground); address via the supervisor surface-score
+    threshold, not PPO fine-tuning.
+  - Promoted the coverage best checkpoint as `models/full/` with
+    `coverage_version: 1` in the sidecar; staged under
+    `runs/stage3_full_coverage_hierarchical/`. The full bundle and the
+    minerals bundle now share the same policy weights by design — the
+    full stage adds only the supervisor's beacon logic.
+- 2026-07-12 — Supervisor stuck-recovery guard:
+  - In-game, deployed beacons are fixed colliders, but headless training
+    skips the collider, so the policy never learns them as obstacles and
+    could wedge against one indefinitely (observed in play).
+  - The supervisor now detects sustained throttle with speed below
+    0.2 m/s for 20 consecutive decisions and issues 10 decisions of
+    reverse-with-steering (`stuck_recovery` mode), alternating turn
+    direction across recoveries. Tilt guard retains priority; coasting
+    at rest never triggers it. Mode-based novelty suppression already
+    excludes recovery motion from PPO coverage credit.
+  - Matched eval (minerals_transition, seed 42, 20 episodes) is
+    unchanged with the guard active; unit tests cover trigger, release,
+    alternation, coast/moving non-triggers, and reset.

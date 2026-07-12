@@ -33,6 +33,7 @@ use hylaeanrover_core::mission_supervisor::{
 use hylaeanrover_core::observation::{OBS_DIM, build_observation};
 use hylaeanrover_core::power_cubes::PowerState;
 use hylaeanrover_core::reward::RewardState;
+use hylaeanrover_core::survey_coverage::{COVERAGE_VERSION, SurveyCoverage};
 use hylaeanrover_core::telemetry::RoverTelemetry;
 use hylaeanrover_core::{AutopilotActive, ChassisEntity, RoverAction, RoverCoreConfig};
 
@@ -81,6 +82,7 @@ struct AutopilotRuntime {
     /// `--mission-supervisor` so existing exported policies keep their
     /// previous behavior unless the operator opts into the safety layer.
     supervisor: Option<MissionSupervisor>,
+    coverage_version: u32,
     last_supervisor_mode: Option<SupervisorMode>,
 }
 
@@ -220,7 +222,7 @@ fn apply_norm_overrides(default: RoverCoreConfig, norm_json: &str) -> RoverCoreC
 
 fn load_runtime(onnx_path: &Path) -> TractResult<AutopilotRuntime> {
     let policy = load_policy(onnx_path)?;
-    let (norm, frame_skip, sidecar_supervisor, supervisor_config) =
+    let (norm, frame_skip, sidecar_supervisor, supervisor_config, coverage_version) =
         load_norm(&norm_path_for(onnx_path))?;
     Ok(AutopilotRuntime {
         policy,
@@ -231,6 +233,7 @@ fn load_runtime(onnx_path: &Path) -> TractResult<AutopilotRuntime> {
         held: RoverAction::default(),
         supervisor: (mission_supervisor_cli_enabled() || sidecar_supervisor)
             .then(|| MissionSupervisor::new(supervisor_config)),
+        coverage_version,
         last_supervisor_mode: None,
     })
 }
@@ -245,7 +248,7 @@ fn load_policy(path: &Path) -> TractResult<Policy> {
 
 /// Parse the `*.norm.json` sidecar: observation normalization stats plus
 /// the frame-skip the policy was trained with.
-fn load_norm(path: &Path) -> TractResult<(NormStats, u32, bool, MissionSupervisorConfig)> {
+fn load_norm(path: &Path) -> TractResult<(NormStats, u32, bool, MissionSupervisorConfig, u32)> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?;
     let v: serde_json::Value = serde_json::from_str(&text)
@@ -276,6 +279,8 @@ fn load_norm(path: &Path) -> TractResult<(NormStats, u32, bool, MissionSuperviso
     let frame_skip = v["frame_skip"].as_u64().unwrap_or(1) as u32;
     let (mission_supervisor, beacons_enabled) = sidecar_runtime_flags(&v);
     let supervisor_config = supervisor_config_from_sidecar(&v, beacons_enabled);
+    let coverage_version = coverage_version_from_sidecar(&v)
+        .map_err(|error| anyhow::anyhow!("{error} in {}", path.display()))?;
     Ok((
         NormStats {
             mean,
@@ -286,7 +291,16 @@ fn load_norm(path: &Path) -> TractResult<(NormStats, u32, bool, MissionSuperviso
         frame_skip,
         mission_supervisor,
         supervisor_config,
+        coverage_version,
     ))
+}
+
+fn coverage_version_from_sidecar(v: &serde_json::Value) -> TractResult<u32> {
+    let version = v["coverage_version"].as_u64().unwrap_or(0) as u32;
+    if version > COVERAGE_VERSION {
+        return Err(anyhow::anyhow!("unsupported coverage_version {version}"));
+    }
+    Ok(version)
 }
 
 fn sidecar_runtime_flags(v: &serde_json::Value) -> (bool, bool) {
@@ -344,6 +358,7 @@ fn autopilot_drive(
     chassis_res: Res<ChassisEntity>,
     xforms: Query<&GlobalTransform>,
     maps: Res<MineralMaps>,
+    coverage: Res<SurveyCoverage>,
     mut action: ResMut<RoverAction>,
 ) {
     // P: toggle. When turning off, zero the action so the keyboard
@@ -387,9 +402,18 @@ fn autopilot_drive(
             .and_then(|id| xforms.get(id).ok())
             .map(|gxf| gxf.translation());
         let obs = build_observation(&telem, &power, &reward, chassis_pos, &maps);
+        let coverage_features = if runtime.coverage_version == COVERAGE_VERSION {
+            chassis_pos.map(|position| {
+                coverage.frontier_features(Vec2::new(position.x, position.z), telem.imu.heading_deg)
+            })
+        } else {
+            None
+        };
         let policy_obs = runtime.supervisor.as_ref().map_or_else(
             || obs.clone(),
-            |supervisor| supervisor.policy_observation(&obs),
+            |supervisor| {
+                supervisor.policy_observation_with_coverage(&obs, coverage_features.as_ref())
+            },
         );
         let normalized = runtime.norm.normalize(&policy_obs);
         match infer(&runtime.policy, &normalized) {
@@ -569,5 +593,16 @@ mod tests {
             defaults.low_power_exit_fraction
         );
         assert!(!config.beacon_guard_enabled);
+    }
+
+    #[test]
+    fn coverage_sidecar_is_versioned_and_backward_compatible() {
+        let legacy: serde_json::Value = serde_json::from_str(r#"{}"#).unwrap();
+        let current: serde_json::Value =
+            serde_json::from_str(r#"{"coverage_version": 1}"#).unwrap();
+        let future: serde_json::Value = serde_json::from_str(r#"{"coverage_version": 2}"#).unwrap();
+        assert_eq!(coverage_version_from_sidecar(&legacy).unwrap(), 0);
+        assert_eq!(coverage_version_from_sidecar(&current).unwrap(), 1);
+        assert!(coverage_version_from_sidecar(&future).is_err());
     }
 }

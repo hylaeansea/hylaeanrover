@@ -74,6 +74,7 @@ def export_policy(
     runtime_power_capacity_wh: float | None = None,
     runtime_supervisor_low_power_enter_fraction: float | None = None,
     runtime_supervisor_low_power_exit_fraction: float | None = None,
+    coverage_observation: bool = False,
     opset: int = 17,
 ) -> tuple[Path, Path]:
     """Export `model_path` (+ `vecnorm_path`) to `out_onnx` + sibling
@@ -148,6 +149,10 @@ def export_policy(
     if runtime_enter is not None:
         stats["supervisor_low_power_enter_fraction"] = float(runtime_enter)
         stats["supervisor_low_power_exit_fraction"] = float(runtime_exit)
+    if coverage_observation:
+        if not mission_supervisor:
+            raise ValueError("coverage observation requires mission_supervisor")
+        stats["coverage_version"] = 1
     venv.close()
     if len(stats["mean"]) != OBS_DIM:
         raise SystemExit(f"vecnorm obs dim {len(stats['mean'])} != OBS_DIM {OBS_DIM}")

@@ -72,6 +72,11 @@ def main() -> None:
         default=None,
         help="runtime-only recovery exit fraction recorded in the sidecar",
     )
+    p.add_argument(
+        "--coverage-observation",
+        action="store_true",
+        help="record and enable the coverage_v1 policy sensor",
+    )
     args = p.parse_args()
 
     out_onnx = Path(args.out) if args.out else Path(args.model).with_suffix(".onnx")
@@ -89,6 +94,7 @@ def main() -> None:
         runtime_supervisor_low_power_exit_fraction=(
             args.runtime_supervisor_low_power_exit_fraction
         ),
+        coverage_observation=args.coverage_observation,
         opset=args.opset,
     )
     print(f"Wrote {onnx}")
