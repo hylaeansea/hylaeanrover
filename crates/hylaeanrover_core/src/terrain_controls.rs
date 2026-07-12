@@ -40,6 +40,12 @@ pub struct TerrainEntity;
 #[derive(Component)]
 pub struct TerrainPanel;
 
+/// Empty container reserved between the terrain controls and the panel
+/// footer; `survey_map_ui` fills it in `PostStartup` so the heatmap
+/// lands above the bottom-pinned footer regardless of spawn order.
+#[derive(Component)]
+pub struct SurveyMapSlot;
+
 #[derive(Resource)]
 pub struct TerrainState {
     pub seed: u64,
@@ -386,6 +392,16 @@ fn setup_ui(mut commands: Commands, ui_font: Option<Res<UiFont>>) {
 
             // Randomize Seed button
             spawn_button(panel, &ui_font, "Randomize seed", RandomizeSeedButton);
+
+            // Survey-map slot, filled by `survey_map_ui` in PostStartup.
+            panel.spawn((
+                Node {
+                    flex_direction: FlexDirection::Column,
+                    row_gap: Val::Px(6.0),
+                    ..default()
+                },
+                SurveyMapSlot,
+            ));
 
             // Footer info
             panel
