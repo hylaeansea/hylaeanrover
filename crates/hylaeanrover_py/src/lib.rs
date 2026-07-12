@@ -181,6 +181,7 @@ impl MissionSupervisor {
             beacon_spacing_m,
             beacon_auto_deploy,
             beacon_surface_score_threshold,
+            ..MissionSupervisorConfig::default()
         };
         Ok(Self {
             inner: RefCell::new(CoreMissionSupervisor::new(config)),

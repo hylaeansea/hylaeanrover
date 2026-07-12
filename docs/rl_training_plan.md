@@ -530,3 +530,16 @@ mid-training via the O key.
     `runs/stage3_full_coverage_hierarchical/`. The full bundle and the
     minerals bundle now share the same policy weights by design — the
     full stage adds only the supervisor's beacon logic.
+- 2026-07-12 — Supervisor stuck-recovery guard:
+  - In-game, deployed beacons are fixed colliders, but headless training
+    skips the collider, so the policy never learns them as obstacles and
+    could wedge against one indefinitely (observed in play).
+  - The supervisor now detects sustained throttle with speed below
+    0.2 m/s for 20 consecutive decisions and issues 10 decisions of
+    reverse-with-steering (`stuck_recovery` mode), alternating turn
+    direction across recoveries. Tilt guard retains priority; coasting
+    at rest never triggers it. Mode-based novelty suppression already
+    excludes recovery motion from PPO coverage credit.
+  - Matched eval (minerals_transition, seed 42, 20 episodes) is
+    unchanged with the guard active; unit tests cover trigger, release,
+    alternation, coast/moving non-triggers, and reset.
