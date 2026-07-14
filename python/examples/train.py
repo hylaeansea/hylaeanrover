@@ -784,7 +784,7 @@ def _save_model_bundle(
     venv.save(os.path.join(best_dir, "vecnorm.pkl"))
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--stage", choices=STAGES, required=True)
     p.add_argument("--timesteps", type=int, default=1_000_000)
@@ -1201,7 +1201,11 @@ def main() -> None:
         action="store_true",
         help="save the behavior-cloned checkpoint and exit before PPO learn()",
     )
-    args = p.parse_args()
+    return p
+
+
+def main() -> None:
+    args = build_parser().parse_args()
     if args.horizon is not None:
         args.max_steps = HORIZON_STEPS[args.horizon]
     if args.teacher_pretrain_only and args.teacher_pretrain_samples <= 0:

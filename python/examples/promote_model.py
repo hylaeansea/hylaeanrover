@@ -53,7 +53,7 @@ def _source_pair(run: Path, source: str) -> tuple[Path, Path]:
     return model, vecnorm
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--stage", choices=STAGES, required=True)
     p.add_argument("--run", required=True, help="training run dir, e.g. runs/stage0")
@@ -102,7 +102,11 @@ def main() -> None:
         action="store_true",
         help="record and enable the coverage_v1 policy sensor",
     )
-    args = p.parse_args()
+    return p
+
+
+def main() -> None:
+    args = build_parser().parse_args()
 
     src_model, src_vecnorm = _source_pair(Path(args.run), args.source)
 

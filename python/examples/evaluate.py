@@ -372,7 +372,7 @@ def summarize(label: str, eps: list[dict[str, Any]]) -> None:
     print(f"  terminal reasons: {dict(reasons)}")
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--stage", choices=STAGES, required=True)
     p.add_argument("--episodes", type=int, default=20)
@@ -494,7 +494,11 @@ def main() -> None:
     )
     p.add_argument("--cube-progress-range-epsilon", type=float, default=0.1)
     p.add_argument("--cube-progress-bearing-epsilon-deg", type=float, default=1.0)
-    args = p.parse_args()
+    return p
+
+
+def main() -> None:
+    args = build_parser().parse_args()
     if args.horizon is not None:
         args.max_steps = HORIZON_STEPS[args.horizon]
     env_kwargs = _env_kwargs_from_args(args)

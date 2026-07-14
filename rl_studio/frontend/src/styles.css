@@ -1,0 +1,193 @@
+:root {
+  color-scheme: dark;
+  --surface: #1a1a19;
+  --panel: #232322;
+  --panel-2: #2c2c2a;
+  --border: #3a3a38;
+  --text: #ffffff;
+  --text-2: #c3c2b7;
+  --text-3: #8a897f;
+  --blue: #3987e5;
+  --aqua: #199e70;
+  --violet: #9085e9;
+  --amber: #c98500;
+  --good: #0ca30c;
+  --critical: #d03b3b;
+  --serious: #ec835a;
+  --warning: #fab219;
+}
+
+* { box-sizing: border-box; }
+
+html, body, #root {
+  margin: 0;
+  height: 100%;
+  background: var(--surface);
+  color: var(--text);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 13px;
+}
+
+.app { display: flex; flex-direction: column; height: 100%; }
+
+/* --- top bar ----------------------------------------------------------- */
+.topbar {
+  display: flex; align-items: center; gap: 12px;
+  padding: 0 14px; height: 46px; flex: none;
+  background: var(--panel); border-bottom: 1px solid var(--border);
+}
+.topbar h1 { font-size: 14px; margin: 0; font-weight: 600; }
+.topbar .env { color: var(--text-3); font-size: 12px; }
+.topbar .spacer { flex: 1; }
+.topbar .rebuild-warning {
+  color: var(--warning); font-size: 12px; max-width: 480px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* --- generic controls --------------------------------------------------- */
+button {
+  background: var(--panel-2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 5px;
+  padding: 4px 10px; font-size: 12px; cursor: pointer;
+}
+button:hover:not(:disabled) { border-color: var(--text-3); }
+button:disabled { opacity: 0.45; cursor: default; }
+button.primary { background: var(--blue); border-color: var(--blue); color: #fff; }
+button.danger { background: transparent; border-color: var(--critical); color: var(--critical); }
+button.small { padding: 2px 7px; font-size: 11px; }
+
+input, select {
+  background: var(--surface); color: var(--text);
+  border: 1px solid var(--border); border-radius: 4px;
+  padding: 3px 6px; font-size: 12px; width: 100%;
+}
+input:focus, select:focus { outline: 1px solid var(--blue); }
+input.modified, select.modified { border-color: var(--blue); }
+
+/* --- layout ------------------------------------------------------------- */
+.main { display: flex; flex: 1; min-height: 0; }
+.canvas-wrap { flex: 1; position: relative; }
+
+/* --- sidebar ------------------------------------------------------------ */
+.sidebar {
+  width: 292px; flex: none; overflow-y: auto;
+  background: var(--panel); border-right: 1px solid var(--border);
+  padding: 10px;
+}
+.sidebar h2 {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--text-3); margin: 12px 0 6px;
+}
+.sidebar .hint { color: var(--text-3); font-size: 11px; margin: 4px 0 10px; }
+
+.ftree { list-style: none; margin: 0; padding: 0 0 0 0; }
+.ftree ul { list-style: none; margin: 0; padding-left: 14px; }
+.ftree li { line-height: 1.7; }
+.ftree .dirname { color: var(--text-2); cursor: pointer; user-select: none; }
+.ftree .file { color: var(--text-3); font-size: 12px; }
+
+.bundle-card {
+  display: flex; align-items: center; gap: 8px;
+  background: var(--panel-2); border: 1px solid var(--border);
+  border-radius: 6px; padding: 6px 8px; margin: 4px 0;
+  cursor: grab;
+}
+.bundle-card:active { cursor: grabbing; }
+.bundle-card .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bundle-card .tags { color: var(--text-3); font-size: 10px; }
+
+/* --- nodes --------------------------------------------------------------- */
+.rf-node {
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 8px; min-width: 230px; max-width: 270px;
+  font-size: 12px;
+  --accent: var(--blue);
+}
+.rf-node.selected { border-color: var(--accent); }
+.rf-node .head {
+  display: flex; align-items: center; gap: 7px;
+  padding: 7px 10px; border-bottom: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 8px 8px 0 0;
+}
+.rf-node .head .title { font-weight: 600; flex: 1; }
+.rf-node .head .kind { color: var(--text-3); font-size: 10px; text-transform: uppercase; }
+.rf-node .body { padding: 8px 10px; border-left: 3px solid transparent; }
+
+.status { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--text-2); }
+.status .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-3); }
+.status.running .dot { background: var(--blue); animation: pulse 1.2s infinite; }
+.status.done .dot { background: var(--good); }
+.status.failed .dot { background: var(--critical); }
+.status.stopped .dot { background: var(--serious); }
+@keyframes pulse { 50% { opacity: 0.35; } }
+
+.param-row { display: flex; align-items: center; gap: 6px; margin: 3px 0; }
+.param-row label {
+  width: 45%; flex: none; color: var(--text-2); font-size: 11px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.param-row input[type="checkbox"] { width: auto; }
+
+.advanced-toggle {
+  background: none; border: none; color: var(--text-3);
+  padding: 4px 0; font-size: 11px; cursor: pointer;
+}
+.advanced-toggle:hover { color: var(--text-2); }
+.advanced { max-height: 240px; overflow-y: auto; margin-top: 4px; }
+.advanced .search { margin-bottom: 6px; }
+
+.node-actions { display: flex; gap: 6px; margin-top: 8px; align-items: center; }
+.metric { color: var(--text-2); font-size: 11px; margin-top: 6px; }
+.metric b { color: var(--text); font-weight: 600; }
+
+.artifact-files { color: var(--text-3); font-size: 11px; margin: 2px 0 6px; }
+
+/* --- log drawer ----------------------------------------------------------- */
+.drawer {
+  flex: none; height: 280px; display: flex; flex-direction: column;
+  background: var(--panel); border-top: 1px solid var(--border);
+}
+.drawer .tabs {
+  display: flex; gap: 2px; padding: 6px 8px 0; align-items: center;
+  overflow-x: auto; flex: none;
+}
+.drawer .tab {
+  padding: 4px 10px; border-radius: 6px 6px 0 0; cursor: pointer;
+  color: var(--text-2); background: transparent; border: 1px solid transparent;
+  white-space: nowrap; font-size: 12px;
+}
+.drawer .tab.active {
+  background: var(--surface); color: var(--text);
+  border-color: var(--border); border-bottom-color: var(--surface);
+}
+.drawer .drawer-body { display: flex; flex: 1; min-height: 0; }
+.drawer .log {
+  flex: 1; margin: 0; padding: 8px 10px; overflow: auto;
+  background: var(--surface);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px; line-height: 1.5; color: var(--text-2);
+  white-space: pre-wrap; word-break: break-all;
+}
+.drawer .side {
+  width: 240px; flex: none; padding: 10px; border-left: 1px solid var(--border);
+  display: flex; flex-direction: column; gap: 8px;
+}
+.drawer .side .argv {
+  color: var(--text-3); font-size: 10px; font-family: ui-monospace, monospace;
+  max-height: 80px; overflow: auto; word-break: break-all;
+}
+.sparkline-title { font-size: 11px; color: var(--text-2); }
+.sparkline-value { font-size: 16px; font-weight: 600; }
+
+.empty-drawer { color: var(--text-3); padding: 16px; }
+
+/* React Flow dark tweaks */
+.react-flow__attribution { display: none; }
+.react-flow__edge-path { stroke: var(--text-3); }
+.react-flow__edge.selected .react-flow__edge-path { stroke: var(--blue); }
+.react-flow__handle {
+  width: 9px; height: 9px; background: var(--text-3);
+  border: 2px solid var(--surface);
+}
+.react-flow__handle:hover { background: var(--blue); }

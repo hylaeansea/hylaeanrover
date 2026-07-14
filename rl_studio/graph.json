@@ -1,0 +1,316 @@
+{
+  "nodes": [
+    {
+      "id": "train_stage0",
+      "type": "training",
+      "label": "Stage 0 \u2014 Locomotion",
+      "pos": [
+        60,
+        240
+      ],
+      "params": {
+        "stage": "locomotion",
+        "timesteps": 2000000,
+        "save": "runs/stage0_locomotion",
+        "seed": 42,
+        "n_envs": 8,
+        "frame_skip": 4,
+        "power_capacity": 100,
+        "horizon": "short",
+        "scenario": "terrain_mixed_1_2",
+        "locomotion_shaping": "power_efficiency",
+        "extra_eval_scenarios": "terrain_fixed_1_0,terrain_fixed_1_5,terrain_fixed_2_0",
+        "eval_freq": 25000,
+        "n_eval_episodes": 10,
+        "checkpoint_freq": 100000,
+        "ent_coef": 0.01,
+        "target_kl": 0.02
+      }
+    },
+    {
+      "id": "eval_stage0",
+      "type": "eval",
+      "label": "Eval locomotion",
+      "pos": [
+        60,
+        560
+      ],
+      "params": {
+        "stage": "locomotion",
+        "episodes": 20,
+        "seed": 1000,
+        "frame_skip": 4,
+        "power_capacity": 100
+      }
+    },
+    {
+      "id": "promote_stage0",
+      "type": "promote",
+      "label": "Promote \u2192 models/locomotion",
+      "pos": [
+        280,
+        40
+      ],
+      "params": {
+        "stage": "locomotion",
+        "source": "best",
+        "frame_skip": 4
+      }
+    },
+    {
+      "id": "train_stage1",
+      "type": "training",
+      "label": "Stage 1 \u2014 Power cubes",
+      "pos": [
+        500,
+        240
+      ],
+      "params": {
+        "stage": "power_cubes",
+        "timesteps": 2000000,
+        "reset_reward_stats": true,
+        "save": "runs/stage1_power_cubes",
+        "seed": 42,
+        "n_envs": 8,
+        "frame_skip": 4,
+        "power_capacity": 100,
+        "horizon": "short",
+        "scenario": "sparse_visible_low_power",
+        "train_scenarios": "dense_training,bridge_low_power,transition,sparse_visible_low_power,sparse_low_power,no_cube_control",
+        "extra_eval_scenarios": "sparse_visible_low_power,sparse_visible_reset,sparse_game,transition,dense_training,no_cube_control",
+        "cube_spawn_seed": 42,
+        "cube_shaping": "intercept",
+        "eval_freq": 25000,
+        "n_eval_episodes": 10,
+        "checkpoint_freq": 100000,
+        "learning_rate": 2e-05,
+        "n_epochs": 4,
+        "ent_coef": 0.01,
+        "target_kl": 0.015
+      }
+    },
+    {
+      "id": "eval_stage1",
+      "type": "eval",
+      "label": "Eval power cubes",
+      "pos": [
+        500,
+        560
+      ],
+      "params": {
+        "stage": "power_cubes",
+        "episodes": 20,
+        "seed": 1000,
+        "frame_skip": 4,
+        "power_capacity": 100,
+        "scenario": "sparse_visible_low_power"
+      }
+    },
+    {
+      "id": "promote_stage1",
+      "type": "promote",
+      "label": "Promote \u2192 models/power_cubes",
+      "pos": [
+        720,
+        40
+      ],
+      "params": {
+        "stage": "power_cubes",
+        "source": "best",
+        "frame_skip": 4
+      }
+    },
+    {
+      "id": "train_stage2",
+      "type": "training",
+      "label": "Stage 2 \u2014 Minerals",
+      "pos": [
+        940,
+        240
+      ],
+      "params": {
+        "stage": "minerals",
+        "timesteps": 2000000,
+        "reset_reward_stats": true,
+        "save": "runs/stage2_minerals",
+        "seed": 42,
+        "n_envs": 8,
+        "frame_skip": 4,
+        "power_capacity": 100,
+        "horizon": "medium",
+        "scenario": "minerals_sparse",
+        "low_power_threshold": 0.35,
+        "locomotion_out_of_power_penalty": 1500,
+        "flip_penalty": 1500,
+        "tilt_penalty": 5,
+        "tilt_threshold_deg": 45,
+        "eval_selection_stat": "median",
+        "eval_failure_penalty": 10000,
+        "selection_extra_scenarios": "transition",
+        "ignored_cube_penalty": 500,
+        "train_scenarios": "minerals_explore,minerals_sparse,minerals_sparse,minerals_transition,minerals_transition,minerals_fixed_2_sparse,no_cube_control,no_cube_control,cube_intercept_low_power",
+        "extra_eval_scenarios": "minerals_explore,minerals_transition,sparse_visible_low_power,sparse_game,no_cube_control,transition,terrain_fixed_1_0,terrain_fixed_2_0",
+        "eval_freq": 25000,
+        "n_eval_episodes": 10,
+        "checkpoint_freq": 100000,
+        "ent_coef": 0.01,
+        "target_kl": 0.02
+      }
+    },
+    {
+      "id": "eval_stage2",
+      "type": "eval",
+      "label": "Eval minerals",
+      "pos": [
+        940,
+        560
+      ],
+      "params": {
+        "stage": "minerals",
+        "episodes": 20,
+        "seed": 1000,
+        "frame_skip": 4,
+        "power_capacity": 100,
+        "scenario": "minerals_sparse"
+      }
+    },
+    {
+      "id": "promote_stage2",
+      "type": "promote",
+      "label": "Promote \u2192 models/minerals",
+      "pos": [
+        1160,
+        40
+      ],
+      "params": {
+        "stage": "minerals",
+        "source": "best",
+        "frame_skip": 4
+      }
+    },
+    {
+      "id": "train_stage3",
+      "type": "training",
+      "label": "Stage 3 \u2014 Full mission",
+      "pos": [
+        1380,
+        240
+      ],
+      "params": {
+        "stage": "full",
+        "timesteps": 2000000,
+        "reset_reward_stats": true,
+        "save": "runs/stage3_full",
+        "seed": 42,
+        "n_envs": 8,
+        "frame_skip": 4,
+        "power_capacity": 100,
+        "horizon": "medium",
+        "scenario": "minerals_transition",
+        "train_scenarios": "minerals_transition,minerals_sparse",
+        "extra_eval_scenarios": "sparse_game",
+        "selection_extra_scenarios": "sparse_game",
+        "eval_selection_stat": "median",
+        "eval_failure_penalty": 10000,
+        "eval_freq": 25000,
+        "n_eval_episodes": 10,
+        "checkpoint_freq": 100000,
+        "ent_coef": 0.01,
+        "target_kl": 0.02,
+        "mission_supervisor": true,
+        "supervisor_beacon_first_distance_m": 100,
+        "supervisor_beacon_spacing_m": 75,
+        "supervisor_beacon_surface_score_threshold": 150
+      }
+    },
+    {
+      "id": "eval_stage3",
+      "type": "eval",
+      "label": "Eval full mission",
+      "pos": [
+        1380,
+        560
+      ],
+      "params": {
+        "stage": "full",
+        "episodes": 20,
+        "seed": 1000,
+        "frame_skip": 4,
+        "power_capacity": 100,
+        "scenario": "minerals_transition",
+        "mission_supervisor": true
+      }
+    },
+    {
+      "id": "promote_stage3",
+      "type": "promote",
+      "label": "Promote \u2192 models/full",
+      "pos": [
+        1600,
+        40
+      ],
+      "params": {
+        "stage": "full",
+        "source": "best",
+        "frame_skip": 4,
+        "mission_supervisor": true
+      }
+    },
+    {
+      "id": "models_full",
+      "type": "artifact",
+      "label": "models/full (promoted)",
+      "pos": [
+        1820,
+        240
+      ],
+      "path": "models/full"
+    }
+  ],
+  "edges": [
+    {
+      "from": "train_stage0",
+      "to": "eval_stage0"
+    },
+    {
+      "from": "train_stage0",
+      "to": "promote_stage0"
+    },
+    {
+      "from": "promote_stage0",
+      "to": "train_stage1"
+    },
+    {
+      "from": "train_stage1",
+      "to": "eval_stage1"
+    },
+    {
+      "from": "train_stage1",
+      "to": "promote_stage1"
+    },
+    {
+      "from": "promote_stage1",
+      "to": "train_stage2"
+    },
+    {
+      "from": "train_stage2",
+      "to": "eval_stage2"
+    },
+    {
+      "from": "train_stage2",
+      "to": "promote_stage2"
+    },
+    {
+      "from": "promote_stage2",
+      "to": "train_stage3"
+    },
+    {
+      "from": "train_stage3",
+      "to": "eval_stage3"
+    },
+    {
+      "from": "train_stage3",
+      "to": "promote_stage3"
+    }
+  ]
+}

@@ -18,3 +18,8 @@
 # RL training outputs (models, vecnorm stats, tensorboard logs)
 runs/
 **/runs/
+
+# rl_studio frontend
+rl_studio/frontend/node_modules/
+rl_studio/frontend/dist/
+rl_studio/frontend/*.tsbuildinfo
